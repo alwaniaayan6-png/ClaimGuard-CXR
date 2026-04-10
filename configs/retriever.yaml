@@ -1,0 +1,33 @@
+# ClaimGuard-CXR Retriever Configuration
+
+dense:
+  model_id: "ncbi/MedCPT-Query-Encoder"
+  article_encoder_id: "ncbi/MedCPT-Article-Encoder"
+  embedding_dim: 768
+  max_query_length: 128
+  max_passage_length: 256
+
+sparse:
+  method: "bm25"
+  k1: 1.5
+  b: 0.75
+
+fusion:
+  method: "rrf"  # Reciprocal Rank Fusion
+  k: 60
+
+reranker:
+  model_id: "cross-encoder/ms-marco-MiniLM-L-12-v2"
+  max_input_length: 512
+
+index:
+  type: "faiss_ivf_pq"
+  nlist: 1024
+  m_pq: 64
+  nprobe: 32
+  top_k_retrieval: 20  # retrieve 20, rerank to top 2
+  top_k_final: 2
+
+data:
+  index_split: "train"  # ONLY training split patients
+  passage_type: "report_sentences"  # index individual sentences from reports

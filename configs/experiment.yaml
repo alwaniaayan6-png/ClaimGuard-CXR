@@ -1,0 +1,69 @@
+# ClaimGuard-CXR Experiment Configuration
+
+project_name: "ClaimGuard-CXR"
+target_venue: "NeurIPS 2026"
+random_seed: 42
+
+data:
+  primary_dataset: "CheXpert-Plus"
+  primary_path: "${DATA_ROOT}/chexpert-plus"
+  external_validation:
+    - name: "PadChest-GR"
+      path: "${DATA_ROOT}/padchest-gr"
+    - name: "IU-XRay"
+      path: "${DATA_ROOT}/iu-xray"
+
+  splits:
+    method: "patient_level"
+    train_fraction: 0.60
+    calibration_fraction: 0.15
+    test_fraction: 0.25
+    seed: 42
+    stratify_by: ["sex", "num_studies_bucket"]
+
+baselines:
+  - name: "no_verification"
+    description: "Generator only, no verification or selection"
+  - name: "conflvlm"
+    description: "ConfLVLM (EMNLP 2025) - claim-level conformal, global thresholds"
+  - name: "prm_style"
+    description: "PRM-style sentence verifier + weighted best-of-N"
+
+ablations:
+  - name: "no_retrieval"
+    description: "Remove retrieval from verifier input"
+  - name: "random_negatives"
+    description: "Train verifier with random negatives instead of hard negatives"
+  - name: "n4_vs_n8"
+    description: "N=4 vs N=8 vs N=4+MBR-BoN on 10K subset"
+    subset_size: 10000
+  - name: "global_vs_group_thresholds"
+    description: "Single global threshold vs pathology-group thresholds"
+
+evaluation:
+  main_metrics:
+    - "chexbert_f1"
+    - "radgraph_f1"
+    - "claim_hallucination_precision"
+    - "claim_hallucination_recall"
+    - "laterality_error_rate"
+    - "fdr_among_green_claims"
+    - "green_claim_fraction"
+
+  additional:
+    - "decomposer_entity_f1"
+    - "decomposer_reconstruction_rougeL"
+    - "grounding_iou"
+    - "grounding_pointing_game"
+    - "temporal_shift_coverage"
+    - "label_noise_sensitivity"
+    - "retrieval_leakage_bm25"
+    - "retrieval_leakage_minhash"
+    - "intra_report_icc"
+    - "pipeline_error_audit"
+
+compute:
+  platform: "modal"
+  gpu_type_heavy: "A10G"  # 24GB, for generator + best-of-N
+  gpu_type_light: "T4"    # 16GB, for verifier + decomposer
+  estimated_cost: "$100-150"

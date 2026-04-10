@@ -1,0 +1,46 @@
+[
+  {
+    "name": "Rule-based (oracle evidence)",
+    "n_claims": 15000,
+    "accuracy": 0.6634,
+    "macro_f1": 0.5477637414123404,
+    "f1_notcontra": 0.7764445428381669,
+    "f1_contra": 0.3190829399865138,
+    "precision_contra": 0.48985507246376814,
+    "recall_contra": 0.2366,
+    "auroc": 0.55687699,
+    "average_precision": 0.6931603461856276,
+    "confusion_matrix": [
+      [
+        8768,
+        1232
+      ],
+      [
+        3817,
+        1183
+      ]
+    ]
+  },
+  {
+    "name": "Rule-based (retrieved evidence)",
+    "n_claims": 15000,
+    "accuracy": 0.6732,
+    "macro_f1": 0.5439259081121792,
+    "f1_notcontra": 0.7867397546332551,
+    "f1_contra": 0.3011120615911035,
+    "precision_contra": 0.5243296921549155,
+    "recall_contra": 0.2112,
+    "auroc": 0.55781157,
+    "average_precision": 0.6936042922338453,
+    "confusion_matrix": [
+      [
+        9042,
+        958
+      ],
+      [
+        3944,
+        1056
+      ]
+    ]
+  }
+]

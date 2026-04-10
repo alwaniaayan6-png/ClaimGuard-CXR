@@ -1,0 +1,70 @@
+# ClaimGuard-CXR Generator Configuration
+
+vision_encoder:
+  name: "RadJEPA"  # or "BiomedCLIP" or "CheXNet"
+  model_id: "AIDElab-IITBombay/RadJEPA"
+  hidden_dim: 768
+  patch_size: 14
+  input_resolution: 384
+  spatial_features: 27  # 384 / 14 ≈ 27
+  freeze: true
+  adapter:
+    enabled: true
+    bottleneck_dim: 32
+    num_adapters: 12  # one per ViT block
+
+decoder:
+  model_id: "microsoft/Phi-3-mini-4k-instruct"
+  init_from: "RadPhi-3"  # use RadPhi-3 weights if available
+  hidden_dim: 3072
+  num_layers: 32
+  num_heads: 32
+  max_seq_length: 2048
+  lora:
+    rank: 16
+    alpha: 32
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+    dropout: 0.05
+  cross_attention:
+    inject_every_n_layers: 4  # 8 cross-attn layers total
+    num_heads: 8
+    shared_dim: 768
+
+training:
+  optimizer: "adamw"
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  scheduler: "cosine"
+  warmup_steps: 500
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  effective_batch_size: 32
+  num_epochs: 3
+  max_grad_norm: 1.0
+  fp16: true
+  gradient_checkpointing: true
+
+generation:
+  default_n: 4
+  ablation_n: 8
+  top_p: 0.9
+  temperatures: [0.7, 0.8, 0.9, 1.0]
+  max_new_tokens: 512
+  do_sample: true
+
+data:
+  dataset: "CheXpert-Plus"
+  image_size: 384
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+  report_section: "findings"  # or "impression" or "both"
+  max_report_tokens: 512

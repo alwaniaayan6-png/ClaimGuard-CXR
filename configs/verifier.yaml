@@ -1,0 +1,78 @@
+# ClaimGuard-CXR Verifier Configuration
+#
+# Note: This file documents intended hyperparameters. The canonical source of
+# truth is the defaults in scripts/modal_train_verifier.py (the Modal script
+# does not currently read this YAML). If you change values here, also update
+# the training script's function signature defaults.
+
+model:
+  name: "RoBERTa-large"
+  model_id: "roberta-large"   # Was DeBERTa-v3; changed after NaN issues
+  hidden_dim: 1024
+  num_layers: 24
+  num_heads: 16
+  max_input_length: 512
+  num_evidence_passages: 2
+
+  # (Future work) Pre-fine-tune on medical NLI before verifier training
+  medical_nli_pretrain:
+    datasets: ["mednli", "radnli"]
+    epochs: 3
+    learning_rate: 2.0e-5
+
+  verdict_head:
+    hidden_dim: 256
+    num_classes: 3  # Supported, Contradicted, Insufficient Evidence
+    dropout: 0.1
+
+  score_head:
+    hidden_dim: 256
+    output_dim: 1  # continuous score in [0, 1]
+    dropout: 0.1
+
+hard_negatives:
+  types:
+    - "negation"                # present <-> absent
+    - "laterality_swap"         # left <-> right (on laterality-sensitive findings only)
+    - "severity_swap"           # mild <-> severe
+    - "temporal_error"          # new <-> unchanged <-> resolved
+    - "finding_substitution"    # clinically confusable pair swap
+    - "region_swap"             # wrong anatomical region (non-laterality)
+    - "device_line_error"       # device position misplacement
+    - "omission_as_support"     # fabricated finding not in report
+
+training:
+  optimizer: "adamw"
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  scheduler: "linear_warmup"
+  warmup_fraction: 0.10
+  batch_size: 32               # Per-device; effective = batch * grad_accum
+  gradient_accumulation: 2     # Effective batch size = 64
+  num_epochs: 3                # With early stopping on val loss
+  max_grad_norm: 1.0
+  fp16: false                  # FP32 on H100 (bf16/fp16 cause NaN)
+  gradient_checkpointing: false  # Disabled — H100 has 80GB VRAM
+  label_smoothing: 0.05        # (M1) CE label smoothing
+
+  val_split:
+    fraction: 0.10             # 10% of patients held out
+    stratify_by: "patient_id"
+    seed: 42
+
+  best_checkpoint:
+    selection_criterion: "val_loss"   # (C12) not train loss
+    early_stop_patience: 1
+
+  loss:
+    ce_weight: 1.0             # InfoNCE dropped (unstable with small batches)
+
+  # Target class balance (enforced at data-generation time, not training)
+  class_balance:
+    supported: 0.333
+    contradicted: 0.333
+    insufficient: 0.333
+
+calibration:
+  temperature_scaling: true    # (C2) applied in scripts/modal_run_evaluation.py
+  reliability_bins: 10         # (C3) 10-bin ECE

@@ -1,0 +1,41 @@
+# ClaimGuard-CXR Conformal Triage Configuration
+
+method: "cfBH"  # conformal Benjamini-Hochberg (Jin & Candes, JMLR 2023)
+
+alpha_levels: [0.05, 0.10]  # target FDR levels to report
+
+# Yellow/red boundary sensitivity analysis
+alpha_low_values: [0.15, 0.20, 0.25, 0.30, 0.40]
+
+pathology_groups:
+  ontology: "chexpert_14_plus"
+  categories:
+    - "No Finding"
+    - "Enlarged Cardiomediastinum"
+    - "Cardiomegaly"
+    - "Lung Opacity"
+    - "Lung Lesion"
+    - "Edema"
+    - "Consolidation"
+    - "Pneumonia"
+    - "Atelectasis"
+    - "Pneumothorax"
+    - "Pleural Effusion"
+    - "Pleural Other"
+    - "Fracture"
+    - "Support Devices"
+    - "Rare/Other"
+  min_calibration_claims: 200  # groups below this merge into Rare/Other
+
+exchangeability:
+  one_per_report_subsampling: true  # subsample 1 claim per report for calibration
+  report_icc_diagnostic: true  # compute and report intra-report ICC
+
+temperature_scaling:
+  enabled: true
+  optimize_on: "calibration"  # learn T on calibration split
+
+bootstrap:
+  method: "patient_cluster"  # resample patients, not claims
+  n_iterations: 2000
+  confidence_level: 0.95

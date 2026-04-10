@@ -1,0 +1,50 @@
+## Main Results (Oracle vs Retrieval, binary v2 verifier)
+
+| Metric | Oracle | Retrieval | Δ |
+|---|---:|---:|---:|
+| Accuracy | 0.9831 | 0.9809 | -0.0022 |
+| Macro F1 | 0.9808 | 0.9784 | -0.0025 |
+| NotContra F1 | 0.9874 | 0.9857 | -0.0017 |
+| Contradicted F1 | 0.9743 | 0.9711 | -0.0033 |
+| ECE (calibrated) | 0.0066 | 0.0060 | -0.0006 |
+
+## Conformal FDR Control (inverted cfBH, global BH)
+
+| α | Oracle n_green | Oracle FDR | Oracle Power | Retr n_green | Retr FDR | Retr Power |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.05 | 9,935 | 0.0130 | 0.9806 | 9,780 | 0.0119 | 0.9664 |
+| 0.10 | 10,204 | 0.0248 | 0.9951 | 10,164 | 0.0234 | 0.9926 |
+| 0.15 | 10,348 | 0.0363 | 0.9972 | 10,340 | 0.0366 | 0.9962 |
+| 0.20 | 10,577 | 0.0559 | 0.9986 | 10,502 | 0.0492 | 0.9985 |
+
+## Per-Pathology Breakdown
+
+| Pathology | n | Oracle Acc | Oracle F1 | Retr Acc | Retr F1 | Δ Acc |
+|---|---:|---:|---:|---:|---:|---:|
+| Atelectasis | 813 | 0.972 | 0.971 | 0.964 | 0.964 | -0.007 |
+| Cardiomegaly | 367 | 0.965 | 0.964 | 0.962 | 0.962 | -0.003 |
+| Consolidation | 522 | 0.973 | 0.970 | 0.969 | 0.965 | -0.004 |
+| Edema | 869 | 0.982 | 0.981 | 0.980 | 0.980 | -0.001 |
+| Enlarged Cardiomediastinum | 190 | 0.989 | 0.989 | 0.989 | 0.989 | +0.000 |
+| Fracture | 83 | 1.000 | 1.000 | 0.976 | 0.966 | -0.024 |
+| Lung Lesion | 64 | 0.984 | 0.984 | 0.984 | 0.984 | +0.000 |
+| Lung Opacity | 1026 | 0.979 | 0.977 | 0.975 | 0.973 | -0.004 |
+| No Finding | 611 | 0.995 | 0.991 | 0.993 | 0.988 | -0.002 |
+| Other | 6438 | 0.988 | 0.983 | 0.987 | 0.982 | -0.001 |
+| Pleural Effusion | 1032 | 0.969 | 0.968 | 0.966 | 0.965 | -0.003 |
+| Pneumonia | 88 | 0.943 | 0.935 | 0.898 | 0.887 | -0.045 |
+| Pneumothorax | 783 | 0.960 | 0.958 | 0.960 | 0.958 | +0.000 |
+| Support Devices | 2114 | 0.993 | 0.993 | 0.992 | 0.992 | -0.001 |
+
+## Per Hard-Negative Type Breakdown
+
+| Negative Type | n | Oracle Acc | Retr Acc | Δ |
+|---|---:|---:|---:|---:|
+| negation | 625 | 0.890 | 0.891 | +0.002 |
+| laterality swap | 625 | 0.934 | 0.934 | +0.000 |
+| severity swap | 625 | 0.990 | 0.990 | +0.000 |
+| temporal error | 625 | 0.989 | 0.982 | -0.006 |
+| finding substitution | 625 | 0.955 | 0.954 | -0.002 |
+| region swap | 625 | 0.962 | 0.958 | -0.003 |
+| device line error | 625 | 0.994 | 0.995 | +0.002 |
+| omission as support | 625 | 0.997 | 1.000 | +0.003 |

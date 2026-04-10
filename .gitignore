@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (too large for git)
+*.csv
+*.json
+!configs/*.yaml
+!figures/*.json
+*.npy
+*.npz
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.index
+*.pkl
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.tiff
+*.dcm
+
+# PDFs (generated figures)
+figures/*.pdf
+
+# Temp
+/tmp/
+*.log
+
+# Secrets
+.claude-secrets/
+*.key
+
+# Modal
+.modal/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Large data directories
+data/
+checkpoints/
+indices/

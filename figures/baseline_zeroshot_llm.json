@@ -1,0 +1,27 @@
+[
+  {
+    "name": "LLM judge (zero-shot, n=1500 stratified)",
+    "model": "zero-shot-llm-judge",
+    "n_claims": 1500,
+    "n_errors": 461,
+    "wall_clock_min": 19.931081751982372,
+    "accuracy": 0.6653333333333333,
+    "macro_f1": 0.504828090517162,
+    "f1_notcontra": 0.7867459643160578,
+    "f1_contra": 0.22291021671826625,
+    "precision_contra": 0.4931506849315068,
+    "recall_contra": 0.144,
+    "auroc": 0.5738780000000001,
+    "average_precision": 0.7086872210568456,
+    "confusion_matrix": [
+      [
+        926,
+        74
+      ],
+      [
+        428,
+        72
+      ]
+    ]
+  }
+]

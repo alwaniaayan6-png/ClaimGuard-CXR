@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "run_date": "2026-04-09",
+    "platform": "RunPod L40S 46GB",
+    "model": "microsoft/deberta-v3-large",
+    "pipeline": "Progressive NLI (MNLI -> MedNLI -> ClaimGuard) + Conformal FDR",
+    "note": "Pod died during baseline phase; these are the results captured from log before disconnect. Training + eval complete. 2 baselines missing (DeBERTa NLI zero-shot, RadFlag).",
+    "gpu_hours": "~2.5 (across 2 pods due to community cloud reclaim)"
+  },
+  "progressive_nli_training": {
+    "stage_1_mnli": {
+      "val_acc": 0.9062,
+      "loss": 0.3628,
+      "epochs": 1,
+      "status": "completed on first pod (A100), checkpoint reused on second pod"
+    },
+    "stage_2_mednli": {
+      "status": "completed, fast (few min)"
+    },
+    "stage_3_claimguard": {
+      "epochs": [
+        {"epoch": 1, "loss": 0.2235, "val_acc": 0.9781},
+        {"epoch": 2, "loss": 0.0475, "val_acc": 0.9841},
+        {"epoch": 3, "loss": 0.0279, "val_acc": 0.9861, "note": "BEST"},
+        {"epoch": 4, "loss": 0.0162, "val_acc": 0.9851},
+        {"epoch": 5, "loss": 0.0080, "val_acc": 0.9838}
+      ],
+      "best_val_acc": 0.9861,
+      "improvement_over_v1": "+0.30 pp (v1 RoBERTa best was 0.9831)"
+    }
+  },
+  "v2_eval_conformal_fdr": {
+    "model": "DeBERTa-v3-large with progressive NLI + ClaimGuard fine-tuning",
+    "test_set": "CheXpert Plus test claims (15K)",
+    "alpha_levels": {
+      "0.01": {"n_green": 9511, "fdr": 0.0023, "power": 0.9489},
+      "0.05": {"n_green": 10100, "fdr": 0.0166, "power": 0.9932},
+      "0.10": {"n_green": 10325, "fdr": 0.0325, "power": 0.9989},
+      "0.15": {"n_green": 10488, "fdr": 0.0470, "power": 0.9995},
+      "0.20": {"n_green": 10676, "fdr": 0.0634, "power": 0.9999}
+    },
+    "comparison_to_v1": {
+      "v1_fdr_at_0.05": 0.0130,
+      "v2_fdr_at_0.05": 0.0166,
+      "v1_power_at_0.05": 0.9806,
+      "v2_power_at_0.05": 0.9932,
+      "power_improvement": "+1.26 pp at alpha=0.05"
+    }
+  },
+  "baselines_partial": {
+    "hypothesis_only": {
+      "note": "Training crashed at E3 due to pod disconnect. E1-E2 completed.",
+      "epochs": [
+        {"epoch": 1, "loss": 0.1984, "val_acc": 0.9725},
+        {"epoch": 2, "loss": 0.0686, "val_acc": 0.9771}
+      ],
+      "interpretation": "SEVERE artifact signal: claim-only model hits 97.71% val acc without any evidence. This means synthetic perturbations (negation flip, laterality swap, etc.) contain strong lexical shortcuts detectable from claim text alone. Paper must acknowledge this limitation."
+    },
+    "deberta_nli_zeroshot": {
+      "status": "not_run",
+      "reason": "pod died before reaching this baseline"
+    },
+    "radflag_consistency": {
+      "status": "not_run",
+      "reason": "pod died before reaching this baseline"
+    }
+  },
+  "key_findings": [
+    "V2 DeBERTa-v3-large + progressive NLI outperforms v1 RoBERTa on validation accuracy (98.61% vs 98.31%)",
+    "V2 conformal FDR has higher power at every alpha level (99.32% vs 98.06% at alpha=0.05)",
+    "V2 FDR is slightly higher than v1 (1.66% vs 1.30% at alpha=0.05) but still well below target alpha",
+    "Hypothesis-only baseline reveals severe surface shortcut artifacts in synthetic hard negatives — this is a critical finding for the paper's limitations section",
+    "Pod instability on RunPod community cloud required 2 pods and a restart mechanism"
+  ]
+}
