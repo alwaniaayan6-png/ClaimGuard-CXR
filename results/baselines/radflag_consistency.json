@@ -1,0 +1,7 @@
+{
+  "method": "RadFlag self-consistency",
+  "accuracy": 0.6516,
+  "contra_recall": 0.0538,
+  "auroc": 0.45567364,
+  "n_claims": 15000
+}

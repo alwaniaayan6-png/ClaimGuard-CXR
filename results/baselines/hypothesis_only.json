@@ -1,0 +1,8 @@
+{
+  "method": "Hypothesis-only DeBERTa",
+  "accuracy": 0.9815333333333334,
+  "contra_recall": 0.9632,
+  "auroc": 0.9976695099999999,
+  "best_val_acc": 0.98342175066313,
+  "interpretation": "SEVERE artifacts: task too easy without evidence"
+}
