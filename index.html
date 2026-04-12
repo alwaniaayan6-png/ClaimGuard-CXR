@@ -1,0 +1,1730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClaimGuard-CXR — Claim-Level Hallucination Detection for Radiology Reports</title>
+  <meta name="description" content="Claim-level hallucination detection for AI-generated chest X-ray radiology reports, with provable false-discovery-rate control. 98.31% accuracy on CheXpert Plus." />
+
+  <!-- Google Fonts: Fraunces (display serif), Manrope (body sans), JetBrains Mono (numerics) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400..700,30..100&family=JetBrains+Mono:wght@400..600&family=Manrope:wght@400..700&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            teal: {
+              50:  '#F0FDFA',
+              100: '#CCFBF1',
+              200: '#99F6E4',
+              400: '#2DD4BF',
+              500: '#14B8A6',
+              600: '#0D9488',
+              700: '#0F766E',
+              800: '#115E59',
+              900: '#134E4A',
+              950: '#042F2E',
+            },
+            stone: {
+              50:  '#FAFAF9',
+              100: '#F5F5F4',
+              200: '#E7E5E4',
+              300: '#D6D3D1',
+              400: '#A8A29E',
+              500: '#78716C',
+              600: '#57534E',
+              700: '#44403C',
+              800: '#292524',
+              900: '#1C1917',
+              950: '#0C0A09',
+            },
+            safe:   '#65A30D',
+            'safe-bg':  '#ECFCCB',
+            warn:   '#D97706',
+            'warn-bg':  '#FEF3C7',
+            danger: '#DC2626',
+            'danger-bg': '#FEE2E2',
+          },
+          fontFamily: {
+            display: ['"Fraunces"', 'Georgia', 'serif'],
+            sans: ['"Manrope"', '-apple-system', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+          },
+          letterSpacing: {
+            tightest: '-0.04em',
+            tighter:  '-0.03em',
+            tight2:   '-0.02em',
+          },
+          boxShadow: {
+            'lift-1': '0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 2px 4px -2px rgba(15, 118, 110, 0.04)',
+            'lift-2': '0 4px 8px -2px rgba(15, 118, 110, 0.06), 0 8px 24px -6px rgba(15, 118, 110, 0.08)',
+            'lift-3': '0 16px 32px -8px rgba(15, 118, 110, 0.10), 0 32px 64px -16px rgba(15, 118, 110, 0.12), inset 0 1px 0 0 rgba(255, 255, 255, 0.5)',
+            'lift-dark': '0 16px 32px -8px rgba(0, 0, 0, 0.35), 0 32px 64px -16px rgba(4, 47, 46, 0.40)',
+          },
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --teal-700: #0F766E;
+      --teal-800: #115E59;
+      --teal-900: #134E4A;
+      --teal-950: #042F2E;
+      --stone-50:  #FAFAF9;
+      --stone-900: #1C1917;
+      --stone-950: #0C0A09;
+      --safe:   #65A30D;
+      --warn:   #D97706;
+      --danger: #DC2626;
+
+      --ease-out-spring: cubic-bezier(0.33, 1, 0.68, 1);
+      --ease-in-out-spring: cubic-bezier(0.65, 0, 0.35, 1);
+    }
+
+    html {
+      scroll-behavior: smooth;
+      /* Offsets anchor jumps so the sticky nav (~78px) doesn't cover the
+         target section's heading. */
+      scroll-padding-top: 96px;
+    }
+
+    body {
+      font-family: 'Manrope', -apple-system, sans-serif;
+      font-feature-settings: 'ss01', 'ss02', 'cv11';
+      color: var(--stone-900);
+      background: var(--stone-50);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+      line-height: 1.7;
+      letter-spacing: -0.01em;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      font-family: 'Fraunces', Georgia, serif;
+      font-feature-settings: 'ss01';
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      font-variation-settings: 'SOFT' 30, 'opsz' 144;
+      color: var(--stone-950);
+    }
+
+    .font-display-soft { font-variation-settings: 'SOFT' 100, 'opsz' 144; }
+    .num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-feature-settings: 'tnum' 1; }
+
+    /* ===== Layered radial gradient backdrops ===== */
+    .bg-hero {
+      background:
+        radial-gradient(ellipse 80% 50% at 18% 8%,  rgba(15, 118, 110, 0.16) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 40% at 85% 14%, rgba(45, 212, 191, 0.10) 0%, transparent 55%),
+        radial-gradient(ellipse 70% 50% at 50% 95%, rgba(4, 47, 46, 0.08) 0%, transparent 60%),
+        radial-gradient(ellipse 40% 30% at 92% 80%, rgba(217, 119, 6, 0.06) 0%, transparent 60%),
+        var(--stone-50);
+    }
+
+    .bg-dark-section {
+      background:
+        radial-gradient(ellipse 90% 50% at 50% 0%, rgba(15, 118, 110, 0.22) 0%, transparent 60%),
+        radial-gradient(ellipse 50% 40% at 15% 90%, rgba(45, 212, 191, 0.10) 0%, transparent 55%),
+        radial-gradient(ellipse 50% 40% at 85% 90%, rgba(220, 38, 38, 0.05) 0%, transparent 55%),
+        #0A1514;
+    }
+
+    .bg-soft-section {
+      background:
+        radial-gradient(ellipse 100% 60% at 50% 0%, rgba(15, 118, 110, 0.04) 0%, transparent 60%),
+        var(--stone-50);
+    }
+
+    /* ===== Grain/noise overlay ===== */
+    .grain::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+      opacity: 0.05;
+      mix-blend-mode: multiply;
+      z-index: 0;
+    }
+    .grain-dark::before { opacity: 0.12; mix-blend-mode: overlay; }
+    .grain > * { position: relative; z-index: 1; }
+
+    /* ===== Editorial rule dividers (not flat borders) ===== */
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: 'Manrope', sans-serif;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--teal-700);
+    }
+    .eyebrow::before {
+      content: '';
+      width: 28px;
+      height: 1px;
+      background: var(--teal-700);
+      display: inline-block;
+    }
+
+    .rule-editorial {
+      border: 0;
+      height: 1px;
+      background: linear-gradient(to right, transparent, rgba(15, 118, 110, 0.35), transparent);
+      margin: 0;
+    }
+
+    /* ===== Button base — all interactive states ===== */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+      padding: 0.95rem 1.6rem;
+      font-family: 'Manrope', sans-serif;
+      font-weight: 600;
+      font-size: 14px;
+      letter-spacing: -0.005em;
+      border-radius: 999px;
+      transition: transform 280ms var(--ease-out-spring), box-shadow 280ms var(--ease-out-spring), background-color 180ms ease, color 180ms ease;
+      will-change: transform;
+      cursor: pointer;
+      text-decoration: none;
+      border: 0;
+      position: relative;
+      outline: none;
+    }
+    .btn:focus-visible {
+      outline: 2px solid var(--teal-700);
+      outline-offset: 3px;
+    }
+    .btn-primary {
+      background: var(--teal-800);
+      color: #F0FDFA;
+      box-shadow:
+        0 1px 0 0 rgba(255, 255, 255, 0.08) inset,
+        0 1px 2px 0 rgba(4, 47, 46, 0.12),
+        0 8px 24px -6px rgba(15, 118, 110, 0.25);
+    }
+    .btn-primary:hover {
+      background: var(--teal-700);
+      transform: translateY(-1px);
+      box-shadow:
+        0 1px 0 0 rgba(255, 255, 255, 0.12) inset,
+        0 2px 4px 0 rgba(4, 47, 46, 0.18),
+        0 16px 32px -6px rgba(15, 118, 110, 0.32);
+    }
+    .btn-primary:active {
+      transform: translateY(0);
+      background: var(--teal-900);
+    }
+    .btn-ghost {
+      background: transparent;
+      color: var(--stone-900);
+      box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.24);
+    }
+    .btn-ghost:hover {
+      background: rgba(15, 118, 110, 0.06);
+      box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.42);
+      transform: translateY(-1px);
+    }
+    .btn-ghost:active {
+      transform: translateY(0);
+      background: rgba(15, 118, 110, 0.10);
+    }
+    .btn .arrow { transition: transform 280ms var(--ease-out-spring); }
+    .btn:hover .arrow { transform: translateX(3px); }
+
+    /* ===== Nav link ===== */
+    .nav-link {
+      font-size: 14px;
+      color: var(--stone-700);
+      text-decoration: none;
+      position: relative;
+      transition: color 180ms ease;
+      padding: 0.25rem 0;
+    }
+    .nav-link::after {
+      content: '';
+      position: absolute;
+      inset: auto 0 -2px 0;
+      height: 1px;
+      background: var(--teal-700);
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 280ms var(--ease-out-spring);
+    }
+    .nav-link:hover { color: var(--stone-950); }
+    .nav-link:hover::after,
+    .nav-link:focus-visible::after { transform: scaleX(1); }
+    .nav-link:focus-visible { outline: none; color: var(--stone-950); }
+
+    /* ===== Card base ===== */
+    .card {
+      background: white;
+      border-radius: 24px;
+      box-shadow: 0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 2px 4px -2px rgba(15, 118, 110, 0.04);
+      transition: transform 320ms var(--ease-out-spring), box-shadow 320ms var(--ease-out-spring);
+      will-change: transform;
+    }
+    .card-hover:hover {
+      transform: translateY(-4px);
+      box-shadow:
+        0 4px 8px -2px rgba(15, 118, 110, 0.08),
+        0 16px 40px -12px rgba(15, 118, 110, 0.14);
+    }
+
+    /* ===== Claim spans (color-coded output) ===== */
+    .claim {
+      display: inline;
+      padding: 0.12em 0.32em;
+      border-radius: 6px;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+      font-weight: 500;
+      transition: background-color 260ms var(--ease-out-spring), color 260ms var(--ease-out-spring), box-shadow 260ms var(--ease-out-spring);
+    }
+    .claim-safe   { background: #ECFCCB; color: #365314; box-shadow: inset 0 0 0 1px rgba(101, 163, 13, 0.24); }
+    .claim-warn   { background: #FEF3C7; color: #78350F; box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.28); }
+    .claim-danger { background: #FEE2E2; color: #7F1D1D; box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.32); }
+
+    /* ===== Interactive demo: pop-in animation for new claims on dropdown change ===== */
+    @keyframes claim-pop {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ===== Interactive demo: pulsing live dot ===== */
+    @keyframes pulse-soft {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: 0.45; transform: scale(1.4); }
+    }
+    .pulse-soft { animation: pulse-soft 2200ms ease-in-out infinite; transform-origin: center; }
+
+    /* ===== HF Space iframe shell ===== */
+    .space-iframe-shell {
+      position: relative;
+      width: 100%;
+      height: 720px;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #FAFAF9;
+      box-shadow:
+        inset 0 0 0 1px rgba(41, 37, 36, 0.08),
+        0 1px 2px 0 rgba(15, 118, 110, 0.04),
+        0 18px 40px -22px rgba(15, 118, 110, 0.18);
+    }
+    .space-iframe-shell iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      display: block;
+    }
+    @media (max-width: 768px) {
+      .space-iframe-shell { height: 640px; }
+    }
+
+    /* ===== Interactive demo: custom select ===== */
+    .demo-select {
+      background: #FAFAF9;
+      box-shadow: inset 0 0 0 1px rgba(41, 37, 36, 0.10), 0 1px 2px 0 rgba(15, 118, 110, 0.03);
+      transition: box-shadow 200ms var(--ease-out-spring), background-color 200ms ease, transform 200ms var(--ease-out-spring);
+      font-family: 'Manrope', sans-serif;
+    }
+    .demo-select:hover {
+      background: #ffffff;
+      box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.32), 0 4px 12px -2px rgba(15, 118, 110, 0.10);
+    }
+    .demo-select:focus-visible {
+      outline: none;
+      background: #ffffff;
+      box-shadow: inset 0 0 0 2px var(--teal-700), 0 0 0 4px rgba(15, 118, 110, 0.14);
+    }
+    .demo-select:active { transform: scale(0.998); }
+
+    /* ===== Interactive demo: FDR range slider ===== */
+    .demo-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 999px;
+      background: linear-gradient(to right,
+        var(--teal-700) 0%,
+        var(--teal-700) var(--fill, 21%),
+        #E7E5E4 var(--fill, 21%),
+        #E7E5E4 100%);
+      outline: none;
+      cursor: pointer;
+      transition: background 80ms linear;
+    }
+    .demo-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #ffffff;
+      cursor: grab;
+      border: none;
+      box-shadow:
+        0 0 0 3px var(--teal-700) inset,
+        0 2px 4px rgba(15, 118, 110, 0.25),
+        0 6px 16px -4px rgba(15, 118, 110, 0.30);
+      transition: transform 220ms var(--ease-out-spring), box-shadow 220ms var(--ease-out-spring);
+    }
+    .demo-slider::-webkit-slider-thumb:hover { transform: scale(1.12); }
+    .demo-slider::-webkit-slider-thumb:active { cursor: grabbing; transform: scale(1.05); }
+    .demo-slider:focus-visible::-webkit-slider-thumb {
+      box-shadow:
+        0 0 0 3px var(--teal-700) inset,
+        0 0 0 4px rgba(15, 118, 110, 0.22),
+        0 2px 4px rgba(15, 118, 110, 0.25),
+        0 6px 16px -4px rgba(15, 118, 110, 0.30);
+    }
+    .demo-slider::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #ffffff;
+      cursor: grab;
+      border: none;
+      box-shadow:
+        0 0 0 3px var(--teal-700) inset,
+        0 2px 4px rgba(15, 118, 110, 0.25),
+        0 6px 16px -4px rgba(15, 118, 110, 0.30);
+      transition: transform 220ms var(--ease-out-spring);
+    }
+    .demo-slider::-moz-range-thumb:hover { transform: scale(1.12); }
+    .demo-slider::-moz-range-thumb:active { cursor: grabbing; transform: scale(1.05); }
+
+    /* ===== Stat card number ===== */
+    .stat-num {
+      font-family: 'Fraunces', Georgia, serif;
+      font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500;
+      font-size: clamp(56px, 6.4vw, 96px);
+      line-height: 0.88;
+      letter-spacing: -0.04em;
+      color: var(--teal-900);
+      font-feature-settings: 'tnum' 1;
+    }
+    .stat-num-dark { color: #F0FDFA; }
+    .stat-num .unit {
+      font-size: 0.38em;
+      margin-left: 0.12em;
+      vertical-align: 0.72em;
+      letter-spacing: 0;
+      color: var(--teal-700);
+    }
+    .stat-num-dark .unit { color: #5EEAD4; }
+
+    /* ===== Page-load staggered reveal (one orchestrated moment) ===== */
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .rise {
+      opacity: 0;
+      animation: rise 900ms var(--ease-out-spring) both;
+    }
+    .rise.d1 { animation-delay: 80ms; }
+    .rise.d2 { animation-delay: 160ms; }
+    .rise.d3 { animation-delay: 240ms; }
+    .rise.d4 { animation-delay: 320ms; }
+    .rise.d5 { animation-delay: 400ms; }
+    .rise.d6 { animation-delay: 480ms; }
+    .rise.d7 { animation-delay: 560ms; }
+
+    /* ===== Scroll reveal (section-triggered) ===== */
+    .reveal {
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 700ms var(--ease-out-spring), transform 700ms var(--ease-out-spring);
+      will-change: transform, opacity;
+    }
+    .reveal.in {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ===== Heading helpers ===== */
+    .hero-heading {
+      font-size: clamp(48px, 7.2vw, 112px);
+      line-height: 0.92;
+      letter-spacing: -0.035em;
+      font-variation-settings: 'SOFT' 50, 'opsz' 144, 'wght' 450;
+    }
+    .section-heading {
+      font-size: clamp(32px, 4.4vw, 64px);
+      line-height: 1.02;
+      letter-spacing: -0.03em;
+      font-variation-settings: 'SOFT' 50, 'opsz' 144, 'wght' 450;
+    }
+    .italic-display { font-style: italic; }
+
+    /* ===== Baseline table ===== */
+    .baseline-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-family: 'Manrope', sans-serif;
+      font-size: 14px;
+    }
+    .baseline-table th, .baseline-table td {
+      padding: 18px 20px;
+      text-align: left;
+      border-bottom: 1px solid var(--stone-200);
+    }
+    .baseline-table th {
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--stone-500);
+      border-bottom-color: var(--stone-300);
+    }
+    .baseline-table td.num-col { font-family: 'JetBrains Mono', ui-monospace, monospace; font-feature-settings: 'tnum' 1; text-align: right; color: var(--stone-700); }
+    .baseline-table tr.winner td { background: linear-gradient(90deg, rgba(15, 118, 110, 0.06), rgba(15, 118, 110, 0.02)); }
+    .baseline-table tr.winner td:first-child { border-left: 3px solid var(--teal-700); padding-left: 17px; }
+    .baseline-table tr.winner td.num-col { color: var(--teal-900); font-weight: 600; }
+    .baseline-table tr:last-child td { border-bottom: 0; }
+
+    /* ===== Method step connector ===== */
+    .method-step {
+      position: relative;
+    }
+    .method-step .step-num {
+      font-family: 'Fraunces', serif;
+      font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500;
+      font-size: 48px;
+      line-height: 1;
+      color: var(--teal-700);
+      letter-spacing: -0.04em;
+    }
+
+    /* ===== Pre/code ===== */
+    pre {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 13px;
+      line-height: 1.65;
+      padding: 18px 22px;
+      border-radius: 12px;
+      background: var(--stone-950);
+      color: #CCFBF1;
+      overflow-x: auto;
+      box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.18);
+    }
+
+    /* ===== Utility: limit wide text for readability ===== */
+    .measure { max-width: 62ch; }
+    .measure-wide { max-width: 78ch; }
+
+    /* ===== Respect reduced motion ===== */
+    @media (prefers-reduced-motion: reduce) {
+      .rise, .reveal, .card, .btn, .arrow, .nav-link::after { animation: none !important; transition: none !important; }
+      .reveal { opacity: 1; transform: none; }
+      .rise   { opacity: 1; }
+    }
+  </style>
+</head>
+
+<body class="antialiased">
+
+  <!-- ============================================================ -->
+  <!-- 1. NAV                                                       -->
+  <!-- ============================================================ -->
+  <nav class="sticky top-0 z-50 backdrop-blur-md bg-stone-50/80 border-b border-stone-200/60">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10 py-4 flex items-center justify-between">
+      <a href="#top" class="flex items-center gap-2.5 group" aria-label="ClaimGuard-CXR home">
+        <!-- Inline SVG logo mark -->
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="16" cy="16" r="14" fill="#0F766E"/>
+          <path d="M10 16.5 L14 20.5 L22 11.5" stroke="#F0FDFA" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="16" cy="16" r="14" stroke="#042F2E" stroke-width="0.6" fill="none" opacity="0.4"/>
+        </svg>
+        <span class="font-display text-[18px] leading-none" style="font-variation-settings: 'SOFT' 50, 'opsz' 144, 'wght' 550; letter-spacing: -0.02em;">ClaimGuard<span class="text-teal-700">-CXR</span></span>
+      </a>
+      <div class="hidden md:flex items-center gap-7">
+        <a href="#problem" class="nav-link">Problem</a>
+        <a href="#method" class="nav-link">Method</a>
+        <a href="#results" class="nav-link">Results</a>
+        <a href="#transfer" class="nav-link">Transfer</a>
+        <a href="#demo" class="nav-link">Demo</a>
+      </div>
+      <a href="https://github.com/alwaniaayan6-png/ClaimGuard-CXR" class="btn btn-ghost" style="padding: 0.55rem 1.1rem; font-size: 13px;" target="_blank" rel="noreferrer noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.93.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.34-1.28-1.7-1.28-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.18-1.18 3.18-1.18.62 1.59.23 2.77.11 3.06.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.26 5.69.41.36.77 1.05.77 2.12 0 1.53-.01 2.77-.01 3.14 0 .3.21.66.79.55C20.21 21.39 23.5 17.09 23.5 12c0-6.35-5.15-11.5-11.5-11.5Z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </nav>
+
+  <!-- ============================================================ -->
+  <!-- 2. HERO                                                      -->
+  <!-- ============================================================ -->
+  <section id="top" class="bg-hero relative grain overflow-hidden">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10 pt-24 pb-28 md:pt-32 md:pb-36">
+      <div class="grid grid-cols-12 gap-x-8 gap-y-14">
+
+        <!-- LEFT — copy -->
+        <div class="col-span-12 lg:col-span-7">
+          <div class="eyebrow rise d1">FDR-Controlled Claim-Level Verification</div>
+
+          <h1 class="hero-heading mt-7 rise d2">
+            Every claim.<br/>
+            Every report.<br/>
+            <span class="italic-display" style="color: var(--teal-800);">Mathematically guaranteed.</span>
+          </h1>
+
+          <p class="mt-9 max-w-[56ch] text-[18px] md:text-[19px] text-stone-700 rise d3" style="line-height: 1.65;">
+            <strong class="text-stone-950">ClaimGuard-CXR</strong> decomposes AI-generated chest X-ray reports into atomic claims, verifies each against retrieved evidence, and flags hallucinations with a provable bound on the false-discovery rate — a guarantee that survives across hospitals without retraining.
+          </p>
+
+          <div class="mt-10 flex flex-wrap items-center gap-4 rise d4">
+            <a href="#results" class="btn btn-primary">
+              See the results
+              <svg class="arrow" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
+            <a href="#demo" class="btn btn-ghost">
+              Try the demo
+            </a>
+            <a href="#method" class="ml-2 text-[14px] text-stone-600 hover:text-stone-950 underline underline-offset-4 decoration-teal-700/40 hover:decoration-teal-700 transition-colors">How it works &rarr;</a>
+          </div>
+
+          <!-- Inline micro-credit row -->
+          <div class="mt-14 pt-7 border-t border-stone-300/60 flex flex-wrap items-center gap-x-10 gap-y-3 rise d5">
+            <div class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full" style="background: var(--teal-700);"></span>
+              <span class="text-[13px] text-stone-600">Trained on CheXpert Plus — <span class="num text-stone-900">223,462</span> reports</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full" style="background: var(--teal-700);"></span>
+              <span class="text-[13px] text-stone-600">Validated on OpenI zero-shot transfer</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT — interactive demo card -->
+        <div class="col-span-12 lg:col-span-5 rise d4">
+          <div class="relative">
+            <!-- Floating tag -->
+            <div class="absolute -top-4 left-7 z-10 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-stone-950 text-stone-50 text-[11px] font-semibold uppercase tracking-[0.15em]">
+              <span class="w-1.5 h-1.5 rounded-full bg-safe pulse-soft"></span>
+              Interactive demo
+            </div>
+
+            <div class="card p-7 md:p-8 bg-white" style="border-radius: 28px; box-shadow: 0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 16px 48px -12px rgba(15, 118, 110, 0.18), 0 32px 80px -20px rgba(4, 47, 46, 0.16), inset 0 1px 0 0 rgba(255, 255, 255, 0.7);">
+              <div class="flex items-center justify-between">
+                <div class="text-[11px] font-semibold text-stone-500 uppercase tracking-[0.14em]">Example report</div>
+                <div class="text-[11px] font-semibold text-stone-500 uppercase tracking-[0.14em] flex items-center gap-1.5">
+                  <span>FDR target</span>
+                  <span id="alpha-display" class="num text-teal-800">α = 0.05</span>
+                </div>
+              </div>
+
+              <!-- Report selector -->
+              <div class="mt-3 relative">
+                <select id="report-select" class="demo-select w-full appearance-none rounded-xl px-4 py-3 pr-10 text-[14px] font-medium text-stone-900 cursor-pointer" aria-label="Select an example radiology report">
+                  <option value="0">Pleural effusion — laterality swap</option>
+                  <option value="1">Normal exam — all verified</option>
+                  <option value="2">Heart failure — negation flip</option>
+                  <option value="3">Trauma — fabricated finding</option>
+                  <option value="4">Post-op — severity swap</option>
+                  <option value="5">Ambiguous case — review zone</option>
+                </select>
+                <svg class="absolute right-4 pointer-events-none" style="top: 50%; transform: translateY(-50%);" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M3 6l5 5 5-5" stroke="#0F766E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+
+              <hr class="rule-editorial mt-5 mb-4" />
+
+              <!-- Claims container (populated by JS) -->
+              <div id="claims-container" class="text-[15.5px] text-stone-800" style="line-height: 1.88; min-height: 132px;">
+                <!-- populated dynamically -->
+              </div>
+
+              <hr class="rule-editorial mt-5 mb-4" />
+
+              <!-- Counts legend -->
+              <div id="counts-row" class="flex flex-wrap items-center gap-x-5 gap-y-2 text-[12px]">
+                <!-- populated dynamically -->
+              </div>
+
+              <!-- Detected hallucination callout -->
+              <div id="demo-callout" class="mt-5 p-4 rounded-2xl" style="background: #FEF2F2; box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.22); display: none;">
+                <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-danger flex items-center gap-1.5">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5 L14.5 13.5 L1.5 13.5 Z M8 6 V9.2 M8 11 V11.4" stroke="#DC2626" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span id="callout-title">Hallucination detected</span>
+                </div>
+                <p id="callout-body" class="mt-1.5 text-[13px] text-stone-800" style="line-height: 1.55;">—</p>
+              </div>
+
+              <!-- FDR slider -->
+              <div class="mt-6">
+                <div class="flex items-center justify-between mb-3">
+                  <div class="text-[11px] font-semibold text-stone-500 uppercase tracking-[0.14em]">Drag α to retriage</div>
+                  <div class="text-[10px] text-stone-500 flex items-center gap-2 num">
+                    <span>0.01</span>
+                    <span class="h-px w-6 bg-stone-300"></span>
+                    <span>0.20</span>
+                  </div>
+                </div>
+                <input type="range" id="alpha-slider" min="0.01" max="0.20" step="0.01" value="0.05" class="demo-slider" aria-label="FDR target alpha" />
+              </div>
+            </div>
+
+            <!-- Floating stat chip (reactive) -->
+            <div class="absolute -bottom-5 -right-4 md:right-6 card px-5 py-3.5 bg-white hidden md:flex items-center gap-3" style="border-radius: 20px; box-shadow: 0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 12px 32px -8px rgba(15, 118, 110, 0.18);">
+              <div class="text-[11px] font-semibold text-stone-500 uppercase tracking-[0.14em]">Observed FDR</div>
+              <div id="observed-fdr-display" class="font-display num" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 28px; color: var(--teal-800); letter-spacing: -0.03em;">1.30<span class="text-[16px] text-teal-700">%</span></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 3. THE PROBLEM                                                -->
+  <!-- ============================================================ -->
+  <section id="problem" class="bg-soft-section py-28 md:py-36">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8">
+        <div class="col-span-12 lg:col-span-5">
+          <div class="eyebrow reveal">The Problem</div>
+          <h2 class="section-heading mt-6 reveal">
+            AI radiology reports hallucinate <span class="italic-display" style="color: var(--danger);">where it matters most.</span>
+          </h2>
+        </div>
+        <div class="col-span-12 lg:col-span-6 lg:col-start-7 lg:pt-10">
+          <p class="text-[17px] text-stone-700 measure reveal" style="line-height: 1.7;">
+            Large language and vision-language models are fluent but routinely invent findings that contradict the underlying imaging study. A single flipped word — "right" instead of "left", "no" instead of "mild" — can change a diagnosis, reroute a workup, or ruin an outcome. Below are the three patterns our verifier catches most frequently.
+          </p>
+        </div>
+      </div>
+
+      <hr class="rule-editorial mt-20" />
+
+      <!-- 3-card grid of hallucination types -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-14">
+
+        <!-- Card 1: Laterality swap -->
+        <div class="card card-hover p-8 reveal" style="border-radius: 22px;">
+          <div class="flex items-start justify-between">
+            <div class="font-display num text-teal-700" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; line-height: 1; letter-spacing: -0.04em;">01</div>
+            <div class="text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500 text-right">Most common<br/>in wrong-side errors</div>
+          </div>
+          <h3 class="mt-7 text-[26px]" style="letter-spacing: -0.028em;">Laterality swap</h3>
+          <p class="mt-3 text-[14px] text-stone-600">The report describes a finding on the opposite side of the one seen in the image.</p>
+          <div class="mt-6 p-5 rounded-2xl bg-stone-50" style="box-shadow: inset 0 0 0 1px rgba(41, 37, 36, 0.08);">
+            <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500 mb-2">Before &rarr; After</div>
+            <p class="text-[14px] text-stone-800"><span class="line-through text-stone-400">left-sided pleural effusion</span></p>
+            <p class="text-[14px] mt-1"><span class="claim claim-danger">right-sided pleural effusion</span></p>
+          </div>
+        </div>
+
+        <!-- Card 2: Negation flip -->
+        <div class="card card-hover p-8 reveal" style="border-radius: 22px;">
+          <div class="flex items-start justify-between">
+            <div class="font-display num text-teal-700" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; line-height: 1; letter-spacing: -0.04em;">02</div>
+            <div class="text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500 text-right">Hardest for the<br/>verifier (89.0%)</div>
+          </div>
+          <h3 class="mt-7 text-[26px]" style="letter-spacing: -0.028em;">Negation flip</h3>
+          <p class="mt-3 text-[14px] text-stone-600">A single word deletion reverses the presence of a finding. Fluent, grammatical, dangerous.</p>
+          <div class="mt-6 p-5 rounded-2xl bg-stone-50" style="box-shadow: inset 0 0 0 1px rgba(41, 37, 36, 0.08);">
+            <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500 mb-2">Before &rarr; After</div>
+            <p class="text-[14px] text-stone-800"><span class="line-through text-stone-400">no pneumothorax is seen</span></p>
+            <p class="text-[14px] mt-1"><span class="claim claim-danger">pneumothorax is seen</span></p>
+          </div>
+        </div>
+
+        <!-- Card 3: Fabricated finding -->
+        <div class="card card-hover p-8 reveal" style="border-radius: 22px;">
+          <div class="flex items-start justify-between">
+            <div class="font-display num text-teal-700" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; line-height: 1; letter-spacing: -0.04em;">03</div>
+            <div class="text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500 text-right">Near-perfect<br/>detection (99.7%)</div>
+          </div>
+          <h3 class="mt-7 text-[26px]" style="letter-spacing: -0.028em;">Fabricated finding</h3>
+          <p class="mt-3 text-[14px] text-stone-600">The model hallucinates a finding with no grounding in the image at all — a phantom pathology.</p>
+          <div class="mt-6 p-5 rounded-2xl bg-stone-50" style="box-shadow: inset 0 0 0 1px rgba(41, 37, 36, 0.08);">
+            <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500 mb-2">Before &rarr; After</div>
+            <p class="text-[14px] text-stone-400 italic">(clean chest radiograph)</p>
+            <p class="text-[14px] mt-1"><span class="claim claim-danger">early right upper lobe consolidation</span></p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 5. HOW IT WORKS                                              -->
+  <!-- ============================================================ -->
+  <section id="method" class="bg-soft-section py-28 md:py-36">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8">
+        <div class="col-span-12 lg:col-span-5">
+          <div class="eyebrow reveal">The method</div>
+          <h2 class="section-heading mt-6 reveal">
+            Four steps. One <span class="italic-display" style="color: var(--teal-800);">guarantee.</span>
+          </h2>
+        </div>
+        <div class="col-span-12 lg:col-span-6 lg:col-start-7 lg:pt-10">
+          <p class="text-[17px] text-stone-700 measure reveal" style="line-height: 1.7;">
+            Decompose, verify, calibrate, triage. Each stage is individually replaceable; the statistical guarantee only relies on exchangeability between the calibration and test distributions.
+          </p>
+        </div>
+      </div>
+
+      <hr class="rule-editorial mt-16" />
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-14">
+
+        <!-- Step 1 -->
+        <div class="method-step p-7 reveal" style="background: white; border-radius: 22px; box-shadow: 0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 2px 4px -2px rgba(15, 118, 110, 0.04);">
+          <div class="step-num">01</div>
+          <div class="mt-5 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Decompose</div>
+          <h3 class="mt-2 text-[22px]" style="letter-spacing: -0.025em;">Atomic claims</h3>
+          <p class="mt-3 text-[14px] text-stone-600" style="line-height: 1.65;">
+            A rule-based extractor splits each report into sentence-level claims. One finding per claim, context-preserving.
+          </p>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="method-step p-7 reveal" style="background: white; border-radius: 22px; box-shadow: 0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 2px 4px -2px rgba(15, 118, 110, 0.04);">
+          <div class="step-num">02</div>
+          <div class="mt-5 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Verify</div>
+          <h3 class="mt-2 text-[22px]" style="letter-spacing: -0.025em;">RoBERTa-large</h3>
+          <p class="mt-3 text-[14px] text-stone-600" style="line-height: 1.65;">
+            A binary cross-encoder, fine-tuned on <span class="num">26,984</span> examples across <strong>8 hard-negative perturbation types</strong>, scores each claim against retrieved evidence.
+          </p>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="method-step p-7 reveal" style="background: white; border-radius: 22px; box-shadow: 0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 2px 4px -2px rgba(15, 118, 110, 0.04);">
+          <div class="step-num">03</div>
+          <div class="mt-5 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Calibrate</div>
+          <h3 class="mt-2 text-[22px]" style="letter-spacing: -0.025em;">Inverted cfBH</h3>
+          <p class="mt-3 text-[14px] text-stone-600" style="line-height: 1.65;">
+            Compute a conformal p-value against the <em>contradicted</em> calibration pool. This inversion fixes the score-saturation failure mode of standard cfBH.
+          </p>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="method-step p-7 reveal" style="background: white; border-radius: 22px; box-shadow: 0 1px 2px 0 rgba(15, 118, 110, 0.04), 0 2px 4px -2px rgba(15, 118, 110, 0.04);">
+          <div class="step-num">04</div>
+          <div class="mt-5 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Triage</div>
+          <h3 class="mt-2 text-[22px]" style="letter-spacing: -0.025em;">Global BH</h3>
+          <p class="mt-3 text-[14px] text-stone-600" style="line-height: 1.65;">
+            Apply Benjamini-Hochberg at level α to decide which claims to flag GREEN. By construction, FDR among GREEN ≤ α.
+          </p>
+        </div>
+      </div>
+
+      <!-- Math callout -->
+      <div class="mt-16 p-8 md:p-10 rounded-[22px] reveal" style="background: var(--stone-950); color: #F5F5F4; box-shadow: 0 24px 64px -16px rgba(4, 47, 46, 0.5);">
+        <div class="grid grid-cols-12 gap-8 items-center">
+          <div class="col-span-12 md:col-span-5">
+            <div class="text-[11px] font-semibold uppercase tracking-[0.15em]" style="color: #5EEAD4;">The key insight</div>
+            <h3 class="mt-4 text-[30px] md:text-[34px]" style="color: #F5F5F4; letter-spacing: -0.028em; line-height: 1.1;">
+              Calibrate on the <span class="italic-display" style="color: #5EEAD4;">wrong</span> ones.
+            </h3>
+          </div>
+          <div class="col-span-12 md:col-span-7">
+            <p class="text-[15px] text-stone-300" style="line-height: 1.75;">
+              Softmax scores for correctly verified claims concentrate near the ceiling (median <span class="num" style="color: #5EEAD4;">0.981</span>, IQR &lt; <span class="num" style="color: #5EEAD4;">0.001</span>), yielding vacuous p-values. By calibrating against contradicted claims — whose scores cluster near <span class="num" style="color: #5EEAD4;">0.01</span> — we recover a non-degenerate reference distribution:
+            </p>
+            <pre class="mt-5">p_j = (|{ i ∈ C_contra : s_i ≥ s_j }| + 1) / (|C_contra| + 1)</pre>
+            <p class="mt-4 text-[13px] text-stone-400" style="line-height: 1.65;">
+              A small p-value means <em>s_j</em> is anomalously high relative to the contradicted distribution — strong evidence the claim is not hallucinated.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 6. KEY RESULTS STAT GRID                                      -->
+  <!-- ============================================================ -->
+  <section id="results" class="bg-hero relative grain py-28 md:py-36 overflow-hidden">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+
+      <div class="grid grid-cols-12 gap-x-8 mb-16">
+        <div class="col-span-12 lg:col-span-6">
+          <div class="eyebrow reveal">The results</div>
+          <h2 class="section-heading mt-6 reveal">
+            What provable FDR control <span class="italic-display" style="color: var(--teal-800);">actually looks like.</span>
+          </h2>
+        </div>
+        <div class="col-span-12 lg:col-span-5 lg:col-start-8 lg:pt-10">
+          <p class="text-[16px] text-stone-600 measure reveal" style="line-height: 1.7;">
+            Evaluated on <span class="num text-stone-900">15,000</span> held-out test claims from CheXpert Plus (16,182 patients, patient-disjoint split).
+          </p>
+        </div>
+      </div>
+
+      <hr class="rule-editorial mb-20" />
+
+      <!-- Stat grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-10 gap-y-16">
+
+        <!-- Stat 1: Accuracy -->
+        <div class="reveal">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Accuracy</div>
+          <div class="stat-num mt-3">98.31<span class="unit">%</span></div>
+          <p class="mt-4 text-[14px] text-stone-600 max-w-[32ch]" style="line-height: 1.65;">Binary verification on oracle evidence. <span class="num text-stone-900">98.09%</span> with retrieved evidence (−0.22 pp).</p>
+        </div>
+
+        <!-- Stat 2: AUROC -->
+        <div class="reveal">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">AUROC</div>
+          <div class="stat-num mt-3">99.52<span class="unit">%</span></div>
+          <p class="mt-4 text-[14px] text-stone-600 max-w-[32ch]" style="line-height: 1.65;">Near-perfect separation between contradicted and not-contradicted claims.</p>
+        </div>
+
+        <!-- Stat 3: Observed FDR -->
+        <div class="reveal">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Observed FDR <span class="ml-1 text-teal-700">@ α=0.05</span></div>
+          <div class="stat-num mt-3">1.30<span class="unit">%</span></div>
+          <p class="mt-4 text-[14px] text-stone-600 max-w-[32ch]" style="line-height: 1.65;">Well below the <span class="num text-stone-900">5%</span> budget. Guarantee holds at every tested α from <span class="num text-stone-900">0.01</span> to <span class="num text-stone-900">0.20</span>.</p>
+        </div>
+
+        <!-- Stat 4: Power -->
+        <div class="reveal">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Power <span class="ml-1 text-teal-700">@ α=0.05</span></div>
+          <div class="stat-num mt-3">98.06<span class="unit">%</span></div>
+          <p class="mt-4 text-[14px] text-stone-600 max-w-[32ch]" style="line-height: 1.65;">Fraction of truly safe claims the system correctly flags GREEN. Near-perfect coverage without excess conservatism.</p>
+        </div>
+
+        <!-- Stat 5: Contradiction recall -->
+        <div class="reveal">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Contradiction Recall</div>
+          <div class="stat-num mt-3">96.38<span class="unit">%</span></div>
+          <p class="mt-4 text-[14px] text-stone-600 max-w-[32ch]" style="line-height: 1.65;">Of the contradicted claims in the test set, the verifier catches <span class="num text-stone-900">96.38%</span>. Best baseline: <span class="num text-stone-900">23.66%</span>.</p>
+        </div>
+
+        <!-- Stat 6: Margin over baselines -->
+        <div class="reveal">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Margin vs. best baseline</div>
+          <div class="stat-num mt-3">+31.1<span class="unit">pp</span></div>
+          <p class="mt-4 text-[14px] text-stone-600 max-w-[32ch]" style="line-height: 1.65;">Over CheXagent-8b — a specialized radiology VLM that has access to the actual chest X-ray image and still achieves <span class="num text-stone-900">0%</span> contradiction recall.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 7. BASELINE COMPARISON TABLE                                  -->
+  <!-- ============================================================ -->
+  <section id="baselines" class="bg-soft-section py-28 md:py-36">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8">
+        <div class="col-span-12 lg:col-span-6">
+          <div class="eyebrow reveal">Baseline comparison</div>
+          <h2 class="section-heading mt-6 reveal">
+            Everyone else collapses <span class="italic-display" style="color: var(--teal-800);">to the majority class.</span>
+          </h2>
+        </div>
+        <div class="col-span-12 lg:col-span-5 lg:col-start-8 lg:pt-10">
+          <p class="text-[16px] text-stone-600 measure reveal" style="line-height: 1.7;">
+            Four baselines, including one specialized vision-language model with access to the underlying X-ray image. All converge near the <span class="num text-stone-900">66.7%</span> majority-class rate.
+          </p>
+        </div>
+      </div>
+
+      <hr class="rule-editorial mt-16 mb-10" />
+
+      <!-- Table wrapper card -->
+      <div class="card reveal" style="overflow: hidden; border-radius: 22px;">
+        <div class="overflow-x-auto">
+        <table class="baseline-table" style="min-width: 720px;">
+          <thead>
+            <tr>
+              <th style="width: 40%;">Method</th>
+              <th class="num-col">Accuracy</th>
+              <th class="num-col">Macro F1</th>
+              <th class="num-col">Contra Recall</th>
+              <th class="num-col">AUROC</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Rule-based (oracle evidence)</td>
+              <td class="num-col">66.34%</td>
+              <td class="num-col">54.78%</td>
+              <td class="num-col">23.66%</td>
+              <td class="num-col">55.69%</td>
+            </tr>
+            <tr>
+              <td>Untrained RoBERTa-large</td>
+              <td class="num-col">66.67%</td>
+              <td class="num-col">40.00%</td>
+              <td class="num-col">0.00%</td>
+              <td class="num-col">&mdash;</td>
+            </tr>
+            <tr>
+              <td>Zero-shot LLM judge <span class="text-stone-400 text-[12px]">(n=1,500)</span></td>
+              <td class="num-col">66.53%</td>
+              <td class="num-col">50.48%</td>
+              <td class="num-col">14.40%</td>
+              <td class="num-col">57.39%</td>
+            </tr>
+            <tr>
+              <td>CheXagent-8b <span class="text-stone-400 text-[12px]">(VLM + image)</span></td>
+              <td class="num-col">67.21%</td>
+              <td class="num-col">40.19%</td>
+              <td class="num-col">0.00%</td>
+              <td class="num-col">49.96%</td>
+            </tr>
+            <tr class="winner">
+              <td><strong>ClaimGuard-CXR</strong> <span class="text-stone-500 text-[12px] font-normal">(oracle evidence)</span></td>
+              <td class="num-col">98.31%</td>
+              <td class="num-col">98.08%</td>
+              <td class="num-col">96.38%</td>
+              <td class="num-col">99.52%</td>
+            </tr>
+            <tr class="winner">
+              <td><strong>ClaimGuard-CXR</strong> <span class="text-stone-500 text-[12px] font-normal">(retrieved evidence)</span></td>
+              <td class="num-col">98.09%</td>
+              <td class="num-col">97.84%</td>
+              <td class="num-col">96.32%</td>
+              <td class="num-col">&mdash;</td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      <p class="mt-8 text-[13px] text-stone-500 italic reveal" style="max-width: 78ch;">
+        CheXagent-8b is the most striking result: a radiology-specialized vision-language model with direct access to the chest X-ray image achieves <span class="num not-italic">0%</span> contradiction recall in zero-shot mode — the same as the untrained baseline. Visual grounding alone is not enough.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 8. CONFORMAL FDR SWEEP CHART                                  -->
+  <!-- ============================================================ -->
+  <section id="fdr-chart" class="bg-hero relative grain py-28 md:py-36 overflow-hidden">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8">
+        <div class="col-span-12 lg:col-span-5">
+          <div class="eyebrow reveal">FDR &amp; Power sweep</div>
+          <h2 class="section-heading mt-6 reveal">
+            Valid. At every <span class="italic-display" style="color: var(--teal-800);">α.</span>
+          </h2>
+          <p class="mt-7 text-[16px] text-stone-700 measure reveal" style="line-height: 1.7;">
+            Observed false-discovery rate stays strictly below the target line across the entire sweep. Power — the fraction of truly safe claims flagged GREEN — stays above <span class="num text-stone-900">98%</span> at every α ≥ 0.05.
+          </p>
+
+          <!-- Mini-legend -->
+          <div class="mt-8 space-y-3 reveal">
+            <div class="flex items-center gap-3">
+              <span class="w-8 h-[3px] rounded-full" style="background: #0F766E;"></span>
+              <span class="text-[13px] text-stone-700">Observed FDR</span>
+            </div>
+            <div class="flex items-center gap-3">
+              <span class="w-8 h-[3px] rounded-full" style="background: #D97706;"></span>
+              <span class="text-[13px] text-stone-700">Power (sensitivity)</span>
+            </div>
+            <div class="flex items-center gap-3">
+              <span class="w-8 h-px" style="background: repeating-linear-gradient(to right, #57534E 0 4px, transparent 4px 8px);"></span>
+              <span class="text-[13px] text-stone-500">Target FDR = α (identity)</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-span-12 lg:col-span-7 lg:pt-8 reveal">
+          <div class="card p-8 bg-white" style="border-radius: 22px;">
+            <!-- Native SVG chart -->
+            <svg viewBox="0 0 680 440" class="w-full h-auto" role="img" aria-labelledby="fdrChartTitle">
+              <title id="fdrChartTitle">FDR and Power across α from 0.01 to 0.20</title>
+
+              <defs>
+                <linearGradient id="fdrGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%"  stop-color="#0F766E" stop-opacity="0.18"/>
+                  <stop offset="100%" stop-color="#0F766E" stop-opacity="0"/>
+                </linearGradient>
+                <pattern id="gridPattern" x="0" y="0" width="1" height="1">
+                  <rect width="100%" height="100%" fill="none"/>
+                </pattern>
+              </defs>
+
+              <!-- Axes background -->
+              <rect x="80" y="30" width="560" height="340" fill="white" stroke="#E7E5E4" stroke-width="1" rx="4"/>
+
+              <!-- Horizontal grid lines -->
+              <g stroke="#E7E5E4" stroke-width="1" stroke-dasharray="2 4">
+                <line x1="80" y1="98"  x2="640" y2="98"/>
+                <line x1="80" y1="166" x2="640" y2="166"/>
+                <line x1="80" y1="234" x2="640" y2="234"/>
+                <line x1="80" y1="302" x2="640" y2="302"/>
+              </g>
+
+              <!-- Target identity line (FDR = α) -->
+              <line x1="80" y1="370" x2="640" y2="302" stroke="#57534E" stroke-width="1.5" stroke-dasharray="5 5"/>
+              <text x="628" y="298" text-anchor="end" fill="#57534E" font-family="JetBrains Mono, monospace" font-size="10">FDR = α</text>
+
+              <!-- POWER LINE (amber/warn) ~98-100% -->
+              <!-- Scale: y=30 is 100%, y=370 is 0%, so 98%=36.8, 99.51%=31.7, 99.72%=30.9, 99.86%=30.5, 99.48%=31.8 -->
+              <!-- Normalized: Pow(α) at 0.01/0.05/0.10/0.15/0.20 = 30.55/98.06/99.51/99.72/99.86 -->
+              <!-- y = 30 + (100 - P) * 340/100. 30.55 → 266.3. 98.06 → 36.6. 99.51 → 31.7. 99.72 → 31.0. 99.86 → 30.5 -->
+              <!-- X: α ∈ [0.01, 0.20] → x ∈ [80, 640].  x = 80 + (α-0.01) * 560/0.19 -->
+              <!-- points: α=0.01 x=80     α=0.05 x=197.9  α=0.10 x=345.3  α=0.15 x=492.6  α=0.20 x=640 -->
+              <path d="M 80,266.3 L 197.9,36.6 L 345.3,31.7 L 492.6,31.0 L 640,30.5"
+                    fill="none" stroke="#D97706" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+
+              <!-- OBSERVED FDR LINE (teal), stays below identity dashed line -->
+              <!-- FDR values: 0.33, 1.30, 2.48, 3.63, 5.59 -->
+              <!-- Scale y = 30 + (100 - (100-FDR*100/10)) wait — FDR axis: left is 0-10% of full scale since we'll show FDR as fraction of max 0-10% of α-scale -->
+              <!-- Easier: show FDR as its raw % but scaled so 10% = top (y=30), 0% = bottom (y=370). 0.33 → 358.78, 1.30 → 325.8, 2.48 → 285.68, 3.63 → 246.58, 5.59 → 180 -->
+              <path d="M 80,358.78 L 197.9,325.8 L 345.3,285.68 L 492.6,246.58 L 640,180"
+                    fill="none" stroke="#0F766E" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              <!-- FDR area fill -->
+              <path d="M 80,358.78 L 197.9,325.8 L 345.3,285.68 L 492.6,246.58 L 640,180 L 640,370 L 80,370 Z"
+                    fill="url(#fdrGradient)"/>
+
+              <!-- FDR data points -->
+              <g fill="white" stroke="#0F766E" stroke-width="2.5">
+                <circle cx="80"    cy="358.78" r="4.5"/>
+                <circle cx="197.9" cy="325.8"  r="4.5"/>
+                <circle cx="345.3" cy="285.68" r="4.5"/>
+                <circle cx="492.6" cy="246.58" r="4.5"/>
+                <circle cx="640"   cy="180"    r="4.5"/>
+              </g>
+
+              <!-- Power data points -->
+              <g fill="white" stroke="#D97706" stroke-width="2.5">
+                <circle cx="80"    cy="266.3" r="4.5"/>
+                <circle cx="197.9" cy="36.6"  r="4.5"/>
+                <circle cx="345.3" cy="31.7"  r="4.5"/>
+                <circle cx="492.6" cy="31.0"  r="4.5"/>
+                <circle cx="640"   cy="30.5"  r="4.5"/>
+              </g>
+
+              <!-- X axis labels -->
+              <g font-family="JetBrains Mono, monospace" font-size="11" fill="#57534E" text-anchor="middle">
+                <text x="80"    y="390">0.01</text>
+                <text x="197.9" y="390">0.05</text>
+                <text x="345.3" y="390">0.10</text>
+                <text x="492.6" y="390">0.15</text>
+                <text x="640"   y="390">0.20</text>
+              </g>
+              <text x="360" y="420" text-anchor="middle" font-family="Manrope, sans-serif" font-size="12" fill="#78716C">Target FDR level α</text>
+
+              <!-- Y axis labels (left = FDR%) -->
+              <g font-family="JetBrains Mono, monospace" font-size="10" fill="#57534E" text-anchor="end">
+                <text x="72" y="34">10%</text>
+                <text x="72" y="102">7.5%</text>
+                <text x="72" y="170">5%</text>
+                <text x="72" y="238">2.5%</text>
+                <text x="72" y="373">0%</text>
+              </g>
+
+              <!-- Annotation: @ α=0.05 -->
+              <g>
+                <circle cx="197.9" cy="325.8" r="9" fill="none" stroke="#0F766E" stroke-width="1" opacity="0.5"/>
+                <line x1="197.9" y1="325.8" x2="250" y2="350" stroke="#0F766E" stroke-width="1" stroke-dasharray="2 2"/>
+                <rect x="252" y="338" width="128" height="36" fill="white" stroke="#0F766E" stroke-width="1" rx="6"/>
+                <text x="316" y="354" text-anchor="middle" font-family="Manrope, sans-serif" font-size="11" font-weight="600" fill="#0F766E">Observed FDR 1.30%</text>
+                <text x="316" y="367" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#78716C">at α = 0.05</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 9. CROSS-DATASET TRANSFER                                    -->
+  <!-- ============================================================ -->
+  <section id="transfer" class="bg-soft-section py-28 md:py-36">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8">
+        <div class="col-span-12 lg:col-span-6">
+          <div class="eyebrow reveal">Cross-dataset transfer</div>
+          <h2 class="section-heading mt-6 reveal">
+            Zero-shot to another hospital. <span class="italic-display" style="color: var(--teal-800);">The guarantee holds.</span>
+          </h2>
+        </div>
+        <div class="col-span-12 lg:col-span-5 lg:col-start-8 lg:pt-10">
+          <p class="text-[16px] text-stone-600 measure reveal" style="line-height: 1.7;">
+            Trained exclusively on CheXpert Plus (Stanford), evaluated zero-shot on OpenI (Indiana University). Accuracy drops as expected under distribution shift — but FDR stays strictly controlled at every α without any retraining.
+          </p>
+        </div>
+      </div>
+
+      <hr class="rule-editorial mt-16 mb-10" />
+
+      <!-- Metric comparison cards -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-14">
+        <div class="card p-7 reveal" style="border-radius: 22px;">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Accuracy drop</div>
+          <div class="flex items-baseline gap-4 mt-4">
+            <div>
+              <div class="font-display num" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; letter-spacing: -0.035em; color: var(--teal-900);">98.31<span class="text-[22px] text-teal-700">%</span></div>
+              <div class="text-[11px] uppercase tracking-[0.12em] text-stone-500 mt-1">CheXpert Plus</div>
+            </div>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" stroke="#78716C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div>
+              <div class="font-display num" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; letter-spacing: -0.035em; color: var(--stone-900);">85.09<span class="text-[22px] text-stone-500">%</span></div>
+              <div class="text-[11px] uppercase tracking-[0.12em] text-stone-500 mt-1">OpenI</div>
+            </div>
+          </div>
+          <p class="mt-5 text-[13px] text-stone-600" style="line-height: 1.6;">Expected: different institution, different reporting conventions. Δ = <span class="num text-danger">−13.22 pp</span>.</p>
+        </div>
+
+        <div class="card p-7 reveal" style="border-radius: 22px; background: linear-gradient(135deg, rgba(15, 118, 110, 0.04), rgba(15, 118, 110, 0.01));">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em]" style="color: var(--teal-700);">FDR @ α=0.05 (held)</div>
+          <div class="flex items-baseline gap-4 mt-4">
+            <div>
+              <div class="font-display num" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; letter-spacing: -0.035em; color: var(--teal-900);">1.30<span class="text-[22px] text-teal-700">%</span></div>
+              <div class="text-[11px] uppercase tracking-[0.12em] text-stone-500 mt-1">CheXpert Plus</div>
+            </div>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" stroke="#0F766E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div>
+              <div class="font-display num" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; letter-spacing: -0.035em; color: var(--teal-900);">0.40<span class="text-[22px] text-teal-700">%</span></div>
+              <div class="text-[11px] uppercase tracking-[0.12em] text-stone-500 mt-1">OpenI</div>
+            </div>
+          </div>
+          <p class="mt-5 text-[13px] text-stone-800" style="line-height: 1.6;">Both under the <span class="num">5%</span> budget. The safety guarantee survives distribution shift.</p>
+        </div>
+
+        <div class="card p-7 reveal" style="border-radius: 22px;">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Power drop</div>
+          <div class="flex items-baseline gap-4 mt-4">
+            <div>
+              <div class="font-display num" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; letter-spacing: -0.035em; color: var(--teal-900);">98.06<span class="text-[22px] text-teal-700">%</span></div>
+              <div class="text-[11px] uppercase tracking-[0.12em] text-stone-500 mt-1">CheXpert Plus</div>
+            </div>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" stroke="#78716C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div>
+              <div class="font-display num" style="font-variation-settings: 'SOFT' 30, 'opsz' 144, 'wght' 500; font-size: 44px; letter-spacing: -0.035em; color: var(--stone-900);">41.58<span class="text-[22px] text-stone-500">%</span></div>
+              <div class="text-[11px] uppercase tracking-[0.12em] text-stone-500 mt-1">OpenI</div>
+            </div>
+          </div>
+          <p class="mt-5 text-[13px] text-stone-600" style="line-height: 1.6;">The correct behavior: the procedure <em>trades power for validity</em> when distribution shifts — never the other way around.</p>
+        </div>
+      </div>
+
+      <!-- Transfer sweep mini-table -->
+      <div class="card p-6 md:p-8 reveal" style="border-radius: 22px;">
+        <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500 mb-4">FDR / Power across α — OpenI zero-shot</div>
+        <div class="overflow-x-auto">
+          <table class="baseline-table">
+            <thead>
+              <tr>
+                <th style="width: 20%;">α</th>
+                <th class="num-col">CheXpert FDR</th>
+                <th class="num-col">OpenI FDR</th>
+                <th class="num-col">CheXpert Power</th>
+                <th class="num-col">OpenI Power</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="num">0.05</td>
+                <td class="num-col">1.30%</td>
+                <td class="num-col">0.40%</td>
+                <td class="num-col">98.06%</td>
+                <td class="num-col">41.58%</td>
+              </tr>
+              <tr>
+                <td class="num">0.10</td>
+                <td class="num-col">2.48%</td>
+                <td class="num-col">1.54%</td>
+                <td class="num-col">99.51%</td>
+                <td class="num-col">58.42%</td>
+              </tr>
+              <tr>
+                <td class="num">0.15</td>
+                <td class="num-col">3.63%</td>
+                <td class="num-col">3.04%</td>
+                <td class="num-col">99.72%</td>
+                <td class="num-col">71.75%</td>
+              </tr>
+              <tr>
+                <td class="num">0.20</td>
+                <td class="num-col">5.59%</td>
+                <td class="num-col">5.65%</td>
+                <td class="num-col">99.86%</td>
+                <td class="num-col">77.92%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 10. PER HARD-NEGATIVE TYPE                                    -->
+  <!-- ============================================================ -->
+  <section id="per-type" class="bg-hero relative grain py-28 md:py-36 overflow-hidden">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8">
+        <div class="col-span-12 lg:col-span-6">
+          <div class="eyebrow reveal">Failure taxonomy</div>
+          <h2 class="section-heading mt-6 reveal">
+            Eight hard-negative types. <span class="italic-display" style="color: var(--teal-800);">One honest spectrum.</span>
+          </h2>
+        </div>
+        <div class="col-span-12 lg:col-span-5 lg:col-start-8 lg:pt-10">
+          <p class="text-[16px] text-stone-600 measure reveal" style="line-height: 1.7;">
+            Each perturbation type targets a distinct clinical failure mode. Negation flips are hardest — single-word edits that fluently reverse a finding.
+          </p>
+        </div>
+      </div>
+
+      <hr class="rule-editorial mt-16 mb-12" />
+
+      <!-- 8-row horizontal bar list -->
+      <div class="space-y-5 reveal">
+        <!-- Row template: name, description, bar showing accuracy, % number -->
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Omission as support</div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 99.7%; background: linear-gradient(to right, #0F766E, #14B8A6);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold text-teal-900" style="font-size: 18px;">99.7%</div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Device/line error</div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 99.4%; background: linear-gradient(to right, #0F766E, #14B8A6);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold text-teal-900" style="font-size: 18px;">99.4%</div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Severity swap</div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 99.0%; background: linear-gradient(to right, #0F766E, #14B8A6);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold text-teal-900" style="font-size: 18px;">99.0%</div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Temporal error</div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 98.9%; background: linear-gradient(to right, #0F766E, #14B8A6);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold text-teal-900" style="font-size: 18px;">98.9%</div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Region swap</div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 96.2%; background: linear-gradient(to right, #0F766E, #14B8A6);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold text-teal-900" style="font-size: 18px;">96.2%</div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Finding substitution</div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 95.5%; background: linear-gradient(to right, #0F766E, #14B8A6);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold text-teal-900" style="font-size: 18px;">95.5%</div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Laterality swap</div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 93.4%; background: linear-gradient(to right, #D97706, #F59E0B);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold" style="font-size: 18px; color: #92400E;">93.4%</div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4 items-center">
+          <div class="col-span-6 md:col-span-3 text-[15px] font-semibold text-stone-900">Negation <span class="text-[11px] text-stone-500 font-normal">(hardest)</span></div>
+          <div class="col-span-12 md:col-span-7 order-3 md:order-none">
+            <div class="h-2 rounded-full bg-stone-200/60 overflow-hidden">
+              <div class="h-full rounded-full" style="width: 89.0%; background: linear-gradient(to right, #DC2626, #F87171);"></div>
+            </div>
+          </div>
+          <div class="col-span-6 md:col-span-2 text-right num font-semibold" style="font-size: 18px; color: #991B1B;">89.0%</div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 12. TRY IT LIVE                                              -->
+  <!-- ============================================================ -->
+  <section id="demo" class="bg-soft-section py-28 md:py-36">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8">
+        <div class="col-span-12 lg:col-span-6">
+          <div class="eyebrow reveal">Try it live</div>
+          <h2 class="section-heading mt-6 reveal">
+            Paste a report. <span class="italic-display" style="color: var(--teal-800);">Drag the slider.</span>
+          </h2>
+          <p class="mt-7 text-[16px] text-stone-700 measure reveal" style="line-height: 1.7;">
+            The live Hugging Face Space runs the full pipeline — extraction, verification, inverted cfBH triage — directly on the trained RoBERTa-large checkpoint. Drop in any radiology report, drag the α slider, and watch every claim re-triage in real time.
+          </p>
+          <div class="mt-10 flex flex-wrap items-center gap-4 reveal">
+            <a href="https://huggingface.co/spaces/aayan1234/claimguard-cxr" class="btn btn-primary" target="_blank" rel="noreferrer noopener">
+              Open in new tab
+              <svg class="arrow" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
+            <a href="https://github.com/alwaniaayan6-png/ClaimGuard-CXR" class="btn btn-ghost" target="_blank" rel="noreferrer noopener">View on GitHub</a>
+          </div>
+        </div>
+
+        <div class="col-span-12 lg:col-span-6 reveal">
+          <div class="card p-3 bg-white" style="border-radius: 22px;">
+            <div class="flex items-center justify-between mb-3 px-3 pt-3">
+              <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Hugging Face Space</div>
+              <div class="flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full pulse-soft" style="background: var(--safe);"></span>
+                <span class="text-[11px] font-semibold uppercase tracking-[0.14em]" style="color: var(--safe);">Live</span>
+              </div>
+            </div>
+            <div class="space-iframe-shell">
+              <iframe
+                src="https://aayan1234-claimguard-cxr.hf.space"
+                title="ClaimGuard-CXR live verifier"
+                loading="lazy"
+                allow="clipboard-write"
+                referrerpolicy="no-referrer"
+              ></iframe>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 13. FOOTER / CITATION                                        -->
+  <!-- ============================================================ -->
+  <footer class="bg-stone-950 relative grain grain-dark pt-24 pb-12 overflow-hidden">
+    <div class="max-w-[1240px] mx-auto px-6 md:px-10">
+      <div class="grid grid-cols-12 gap-x-8 gap-y-14">
+
+        <div class="col-span-12 lg:col-span-5">
+          <div class="flex items-center gap-2.5">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+              <circle cx="16" cy="16" r="14" fill="#0F766E"/>
+              <path d="M10 16.5 L14 20.5 L22 11.5" stroke="#F0FDFA" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="font-display text-[22px] leading-none" style="font-variation-settings: 'SOFT' 50, 'opsz' 144, 'wght' 550; letter-spacing: -0.02em; color: #F5F5F4;">ClaimGuard<span style="color: #5EEAD4;">-CXR</span></span>
+          </div>
+          <p class="mt-6 text-[14px] text-stone-400 max-w-[44ch]" style="line-height: 1.7;">
+            Claim-level hallucination detection for AI-generated chest X-ray radiology reports, with provable false-discovery-rate control.
+          </p>
+          <div class="mt-8 flex items-center gap-3">
+            <a href="https://github.com/alwaniaayan6-png/ClaimGuard-CXR" class="btn btn-ghost" style="padding: 0.65rem 1.1rem; font-size: 13px; color: #F5F5F4; box-shadow: inset 0 0 0 1px rgba(94, 234, 212, 0.3);" target="_blank" rel="noreferrer noopener">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.93.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.34-1.28-1.7-1.28-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.18-1.18 3.18-1.18.62 1.59.23 2.77.11 3.06.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.26 5.69.41.36.77 1.05.77 2.12 0 1.53-.01 2.77-.01 3.14 0 .3.21.66.79.55C20.21 21.39 23.5 17.09 23.5 12c0-6.35-5.15-11.5-11.5-11.5Z"/></svg>
+              GitHub
+            </a>
+          </div>
+        </div>
+
+        <div class="col-span-12 lg:col-span-3 lg:col-start-7">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.15em]" style="color: #5EEAD4;">Sections</div>
+          <ul class="mt-5 space-y-3 text-[14px]">
+            <li><a href="#problem" class="text-stone-400 hover:text-stone-50" style="transition: color 180ms ease;">Problem</a></li>
+            <li><a href="#method" class="text-stone-400 hover:text-stone-50" style="transition: color 180ms ease;">Method</a></li>
+            <li><a href="#results" class="text-stone-400 hover:text-stone-50" style="transition: color 180ms ease;">Results</a></li>
+            <li><a href="#transfer" class="text-stone-400 hover:text-stone-50" style="transition: color 180ms ease;">Transfer</a></li>
+            <li><a href="#demo" class="text-stone-400 hover:text-stone-50" style="transition: color 180ms ease;">Demo</a></li>
+          </ul>
+        </div>
+
+      </div>
+
+      <hr class="rule-editorial mt-20 mb-8" style="background: linear-gradient(to right, transparent, rgba(94, 234, 212, 0.3), transparent);"/>
+
+      <div class="flex flex-wrap items-center justify-between gap-4">
+        <div class="text-[12px] text-stone-500">© 2026 Aayan Alwani &middot; Research prototype &middot; Not for clinical use</div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ============================================================ -->
+  <!-- Interactive hero demo — JS port of the inverted cfBH triage    -->
+  <!-- (same logic as verifact/demo/app.py conformal_triage)          -->
+  <!-- ============================================================ -->
+  <script>
+    (function initHeroDemo() {
+      // Fake calibration distribution: simulates scores of contradicted claims.
+      // Mostly near 0 (as in the real model), with a long tail up to ~0.71 so that
+      // medium-confidence test claims produce distinguishable p-values.
+      const CAL = [
+        0.003, 0.005, 0.007, 0.008, 0.009, 0.011, 0.012, 0.015, 0.018, 0.018,
+        0.022, 0.025, 0.025, 0.028, 0.031, 0.033, 0.038, 0.042, 0.046, 0.051,
+        0.058, 0.062, 0.065, 0.072, 0.081, 0.095, 0.113, 0.184, 0.243, 0.422,
+        0.618, 0.714
+      ];
+
+      // Curated example reports. Each claim has:
+      //   t: claim text
+      //   s: softmax score from the verifier (high = supported, low = contradicted)
+      //   h: human-readable hallucination description (only on hallucinated claims)
+      //   ht: callout title (only on hallucinated claims)
+      const REPORTS = [
+        { // 0 — default: pleural effusion with laterality swap
+          claims: [
+            { t: "The heart is normal in size.", s: 0.986 },
+            { t: "The lungs are clear without focal consolidation.", s: 0.991 },
+            { t: "There is a large right-sided pleural effusion.", s: 0.007,
+              h: "Report claims a <em>right</em>-sided effusion, but the underlying imaging study shows a <em>left</em>-sided effusion.",
+              ht: "Laterality swap detected" },
+            { t: "A right subclavian central venous catheter terminates in the SVC.", s: 0.989 },
+            { t: "No acute osseous abnormality.", s: 0.982 }
+          ]
+        },
+        { // 1 — normal exam: all verified
+          claims: [
+            { t: "The heart is normal in size.", s: 0.993 },
+            { t: "The lungs are clear without focal consolidation.", s: 0.989 },
+            { t: "No pleural effusion or pneumothorax.", s: 0.991 },
+            { t: "The mediastinal contours are normal.", s: 0.985 },
+            { t: "No acute osseous abnormality.", s: 0.987 }
+          ]
+        },
+        { // 2 — heart failure: negation flip
+          claims: [
+            { t: "Severe cardiomegaly is present.", s: 0.988 },
+            { t: "Bilateral pleural effusions are present.", s: 0.991 },
+            { t: "Pulmonary vascular congestion is noted.", s: 0.984 },
+            { t: "There is a moderate pneumothorax.", s: 0.009,
+              h: "The actual report states there is <em>no</em> pneumothorax. The generator dropped the negation.",
+              ht: "Negation flip detected" },
+            { t: "Findings consistent with decompensated heart failure.", s: 0.982 }
+          ]
+        },
+        { // 3 — trauma: fabricated finding
+          claims: [
+            { t: "Multiple right-sided rib fractures are noted.", s: 0.989 },
+            { t: "No evidence of pneumothorax or hemothorax.", s: 0.985 },
+            { t: "Early right upper lobe consolidation is noted.", s: 0.005,
+              h: "No consolidation is visible on the actual chest X-ray. The generator invented a finding with no imaging support.",
+              ht: "Fabricated finding detected" },
+            { t: "The mediastinal contours are within normal limits.", s: 0.988 },
+            { t: "No acute cardiopulmonary process.", s: 0.981 }
+          ]
+        },
+        { // 4 — post-op: severity swap
+          claims: [
+            { t: "Status post right upper lobe resection.", s: 0.988 },
+            { t: "A right chest tube terminates near the apex.", s: 0.992 },
+            { t: "There is a large right apical pneumothorax.", s: 0.014,
+              h: "The actual pneumothorax is <em>small</em>, not large. The generator exaggerated the severity.",
+              ht: "Severity swap detected" },
+            { t: "Postoperative changes in the right lower lobe.", s: 0.983 },
+            { t: "Mediastinal contours appear stable.", s: 0.986 }
+          ]
+        },
+        { // 5 — ambiguous: one claim lands in the yellow review zone
+          claims: [
+            { t: "Mild cardiomegaly.", s: 0.981 },
+            { t: "Possible early interstitial edema in the lower zones.", s: 0.58 },
+            { t: "No focal consolidation identified.", s: 0.986 },
+            { t: "Small right pleural effusion.", s: 0.989 },
+            { t: "No pneumothorax.", s: 0.984 }
+          ]
+        }
+      ];
+
+      // Real FDR/power sweep values from the paper — the chip interpolates between these.
+      const FDR_CURVE = [
+        { a: 0.01, fdr: 0.33 },
+        { a: 0.05, fdr: 1.30 },
+        { a: 0.10, fdr: 2.48 },
+        { a: 0.15, fdr: 3.63 },
+        { a: 0.20, fdr: 5.59 }
+      ];
+
+      function interpFDR(alpha) {
+        if (alpha <= FDR_CURVE[0].a) return FDR_CURVE[0].fdr;
+        if (alpha >= FDR_CURVE[FDR_CURVE.length - 1].a) return FDR_CURVE[FDR_CURVE.length - 1].fdr;
+        for (let i = 0; i < FDR_CURVE.length - 1; i++) {
+          const lo = FDR_CURVE[i], hi = FDR_CURVE[i + 1];
+          if (alpha >= lo.a && alpha <= hi.a) {
+            const t = (alpha - lo.a) / (hi.a - lo.a);
+            return lo.fdr + t * (hi.fdr - lo.fdr);
+          }
+        }
+        return 1.30;
+      }
+
+      // Inverted conformal p-value: p_j = (|{i in C_contra : s_i >= s_j}| + 1) / (|C_contra| + 1)
+      function pValue(score) {
+        let count = 0;
+        for (const s of CAL) if (s >= score) count++;
+        return (count + 1) / (CAL.length + 1);
+      }
+
+      // Apply BH at level alpha, then assign SAFE / WARN / DANGER labels.
+      // Matches verifact/demo/app.py conformal_triage().
+      function triage(claims, alpha) {
+        const enriched = claims.map((c, idx) => ({ ...c, idx, p: pValue(c.s) }));
+        const sorted = [...enriched].sort((a, b) => a.p - b.p);
+        const n = sorted.length;
+        let kStar = 0;
+        for (let k = 1; k <= n; k++) {
+          if (sorted[k - 1].p <= (k * alpha) / n) kStar = k;
+        }
+        const threshold = kStar > 0 ? sorted[kStar - 1].p : -1;
+        return enriched.map(c => {
+          let t;
+          if (kStar > 0 && c.p <= threshold) t = 'safe';
+          else if (c.s > 0.3) t = 'warn';
+          else t = 'danger';
+          return { ...c, triage: t };
+        });
+      }
+
+      // DOM refs
+      const slider     = document.getElementById('alpha-slider');
+      const select     = document.getElementById('report-select');
+      const alphaDisp  = document.getElementById('alpha-display');
+      const claimsBox  = document.getElementById('claims-container');
+      const countsRow  = document.getElementById('counts-row');
+      const callout    = document.getElementById('demo-callout');
+      const calloutT   = document.getElementById('callout-title');
+      const calloutB   = document.getElementById('callout-body');
+      const fdrChip    = document.getElementById('observed-fdr-display');
+
+      if (!slider || !select || !claimsBox) return; // demo not present on this page
+
+      function buildClaims(claims) {
+        claimsBox.innerHTML = '';
+        claims.forEach((c) => {
+          const span = document.createElement('span');
+          span.className = 'claim';
+          span.textContent = c.t;
+          claimsBox.appendChild(span);
+          claimsBox.appendChild(document.createTextNode(' '));
+        });
+      }
+
+      function animateClaims() {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        const spans = claimsBox.querySelectorAll('.claim');
+        spans.forEach((s, i) => {
+          s.style.animation = 'none';
+          // Force reflow so the new animation is applied cleanly.
+          // eslint-disable-next-line no-unused-expressions
+          s.offsetWidth;
+          s.style.animation = `claim-pop 480ms var(--ease-out-spring) ${i * 55}ms both`;
+        });
+      }
+
+      function applyTriage(claims, alpha) {
+        const triaged = triage(claims, alpha);
+        const spans = claimsBox.querySelectorAll('.claim');
+        let nSafe = 0, nWarn = 0, nDanger = 0;
+        let firstDanger = null;
+        triaged.forEach((c, i) => {
+          const span = spans[i];
+          if (!span) return;
+          span.classList.remove('claim-safe', 'claim-warn', 'claim-danger');
+          span.classList.add('claim-' + c.triage);
+          if (c.triage === 'safe') nSafe++;
+          else if (c.triage === 'warn') nWarn++;
+          else { nDanger++; if (!firstDanger && c.h) firstDanger = c; }
+        });
+
+        countsRow.innerHTML =
+          '<span class="inline-flex items-center gap-2 text-stone-700"><span class="w-2.5 h-2.5 rounded-sm bg-safe-bg" style="box-shadow: inset 0 0 0 1px rgba(101, 163, 13, 0.5);"></span>Verified <span class="text-stone-400">·</span> <span class="num text-stone-900">' + nSafe + '</span></span>' +
+          '<span class="inline-flex items-center gap-2 text-stone-700"><span class="w-2.5 h-2.5 rounded-sm bg-warn-bg" style="box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.55);"></span>Review <span class="text-stone-400">·</span> <span class="num text-stone-900">' + nWarn + '</span></span>' +
+          '<span class="inline-flex items-center gap-2 text-stone-700"><span class="w-2.5 h-2.5 rounded-sm bg-danger-bg" style="box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.55);"></span>Hallucinated <span class="text-stone-400">·</span> <span class="num text-stone-900">' + nDanger + '</span></span>';
+
+        if (firstDanger) {
+          callout.style.display = 'block';
+          calloutT.textContent = firstDanger.ht || 'Hallucination detected';
+          calloutB.innerHTML = firstDanger.h + ' Verifier score: <span class="num">' + firstDanger.s.toFixed(3) + '</span>.';
+        } else {
+          callout.style.display = 'none';
+        }
+      }
+
+      function updateAlphaUI(alpha) {
+        alphaDisp.textContent = 'α = ' + alpha.toFixed(2);
+        const pct = ((alpha - 0.01) / (0.20 - 0.01)) * 100;
+        slider.style.setProperty('--fill', pct + '%');
+        const fdr = interpFDR(alpha);
+        if (fdrChip) {
+          fdrChip.innerHTML = fdr.toFixed(2) + '<span class="text-[16px] text-teal-700">%</span>';
+        }
+      }
+
+      function render(opts) {
+        opts = opts || {};
+        const alpha = parseFloat(slider.value);
+        const reportIdx = parseInt(select.value, 10);
+        const report = REPORTS[reportIdx];
+        if (opts.rebuild) {
+          buildClaims(report.claims);
+          animateClaims();
+        }
+        updateAlphaUI(alpha);
+        applyTriage(report.claims, alpha);
+      }
+
+      slider.addEventListener('input', function () { render({ rebuild: false }); });
+      select.addEventListener('change', function () { render({ rebuild: true }); });
+
+      // Initial build
+      render({ rebuild: true });
+    })();
+  </script>
+
+  <!-- Scroll-reveal JS: intersection observer only animates opacity + transform -->
+  <script>
+    (function () {
+      const els = document.querySelectorAll('.reveal');
+      if (!('IntersectionObserver' in window) || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        els.forEach((el) => el.classList.add('in'));
+        return;
+      }
+      const io = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('in');
+              io.unobserve(entry.target);
+            }
+          });
+        },
+        { threshold: 0.12, rootMargin: '0px 0px -8% 0px' }
+      );
+      els.forEach((el) => io.observe(el));
+    })();
+  </script>
+</body>
+</html>
