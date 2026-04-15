@@ -121,6 +121,41 @@ DEFAULT_PROMPT = (
     "Include Findings and Impression sections."
 )
 
+# CheXagent README-validated prompt template (2026-04-15 source dump
+# of StanfordAIMI/CheXagent-8b/README.md):
+#
+#     prompt = 'Describe "Airway"'
+#     inputs = processor(images=images,
+#                        text=f' USER: <s>{prompt} ASSISTANT: <s>',
+#                        return_tensors='pt')
+#     output = model.generate(**inputs, generation_config=generation_config)
+#
+# Key facts:
+#   1. Leading space before "USER:" is INTENTIONAL.
+#   2. <s> tokens wrap the prompt + appear after ASSISTANT:.
+#   3. CheXagent is trained for per-anatomy queries, NOT free-form
+#      "generate a report".  Stanford's example queries "Airway".
+#   4. Use GenerationConfig.from_pretrained() to get the model's
+#      specific generation defaults (top_p, repetition_penalty, etc.)
+#      — generic gen_kwargs will not match the model's expected
+#      configuration.
+CHEXAGENT_README_PROMPT_TMPL = ' USER: <s>{prompt} ASSISTANT: <s>'
+
+# CheXagent's training prompts cycle through these 8 anatomical
+# regions.  For Task 9 we query just one of them per image (the
+# default is "Findings") to keep wall-clock cost down.  For a richer
+# report you'd loop through all of them and concatenate the answers.
+CHEXAGENT_ANATOMIES = (
+    "Airway",
+    "Breathing",
+    "Cardiac",
+    "Diaphragm",
+    "Everything else",
+    "Findings",
+    "Impression",
+)
+CHEXAGENT_DEFAULT_QUERY = 'Describe "Findings"'
+
 
 @app.function(
     image=gen_image,
@@ -656,6 +691,81 @@ def _run_single_image(
             from_list_format path.  ``None`` disables that strategy.
     """
     import torch
+
+    # ---- Strategy 0: README-validated CheXagent format (PRIMARY) ----
+    # Source: StanfordAIMI/CheXagent-8b README.md, captured via
+    # scripts/cat_chexagent_processor.py on 2026-04-15.  Stanford's
+    # exact inference snippet uses:
+    #     prompt = 'Describe "Airway"'
+    #     inputs = processor(images, text=' USER: <s>{prompt} ASSISTANT: <s>')
+    #     output = model.generate(**inputs, generation_config=GENCFG)
+    #
+    # CheXagent is trained for per-anatomy queries, NOT free-form
+    # report generation.  We use the generic CHEXAGENT_DEFAULT_QUERY
+    # ('Describe "Findings"') which is the closest single-query
+    # equivalent to a full report.  If the caller passes a custom
+    # prompt that DOESN'T match the Describe "<region>" pattern, we
+    # still wrap it in the README template — the model may degrade
+    # but at least won't return empty strings.
+    if processor is not None:
+        try:
+            # Use the dedicated CheXagent query if the caller didn't
+            # override; otherwise use whatever they passed.
+            chexagent_query = (
+                CHEXAGENT_DEFAULT_QUERY
+                if prompt == DEFAULT_PROMPT
+                else prompt
+            )
+            wrapped = CHEXAGENT_README_PROMPT_TMPL.format(
+                prompt=chexagent_query,
+            )
+            inputs = processor(
+                images=image,
+                text=wrapped,
+                return_tensors="pt",
+            ).to(device)
+            # Try to load the model's bundled GenerationConfig once
+            # (cached in a function attribute).  Falls back to
+            # gen_kwargs if the config isn't present.
+            generation_config = getattr(
+                _run_single_image, "_chexagent_gen_cfg", None,
+            )
+            if generation_config is None:
+                try:
+                    from transformers import GenerationConfig
+                    generation_config = GenerationConfig.from_pretrained(
+                        "StanfordAIMI/CheXagent-8b",
+                    )
+                    _run_single_image._chexagent_gen_cfg = generation_config  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            with torch.no_grad():
+                if generation_config is not None:
+                    output_ids = model.generate(
+                        **inputs,
+                        generation_config=generation_config,
+                    )
+                else:
+                    output_ids = model.generate(**inputs, **gen_kwargs)
+            text = (tokenizer or processor).decode(  # type: ignore[union-attr]
+                output_ids[0], skip_special_tokens=True
+            )
+            # Strip the README prompt template so we return only the
+            # generated content.  The decoded text usually contains
+            # the prompt echo plus the assistant's response.
+            stripped = _strip_prompt(text, wrapped)
+            if not stripped:
+                stripped = _strip_prompt(text, chexagent_query)
+            if not stripped:
+                stripped = text.strip()
+            if stripped:
+                return stripped
+            print("  README-format path returned empty text")
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"  README-format path failed: "
+                f"{type(e).__name__}: {str(e)[:200]}"
+            )
 
     # ---- Strategy 1: tokenizer.apply_chat_template + processor ----
     # Introspection of CheXagent-8b (printed at load time) showed:
