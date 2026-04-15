@@ -587,6 +587,22 @@ def _load_chexagent(device):
             continue
 
         print(f"  loaded {model_id} successfully")
+        # Debug: introspect which inference APIs are available so we
+        # don't have to guess which code path to use.  Printed once
+        # per cold start, not per image.
+        _relevant = [
+            "chat", "from_list_format", "apply_chat_template",
+            "build_chat_input", "generate",
+        ]
+        for obj_name, obj in (
+            ("model", model),
+            ("tokenizer", tokenizer),
+            ("processor", processor),
+        ):
+            if obj is None:
+                continue
+            present = [m for m in _relevant if hasattr(obj, m)]
+            print(f"  {obj_name} has: {present}")
         return model, processor, tokenizer, image_processor, model_id
 
     print("All CheXagent variants failed to load.")
@@ -641,7 +657,67 @@ def _run_single_image(
     """
     import torch
 
-    # ---- Strategy 1: tokenizer.from_list_format (CheXagent native) ----
+    # ---- Strategy 1: tokenizer.apply_chat_template + processor ----
+    # Introspection of CheXagent-8b (printed at load time) showed:
+    #     model has: ['generate']
+    #     tokenizer has: ['apply_chat_template']
+    #     processor has: []
+    # → the ONLY chat-template API available is on the tokenizer.
+    # This is the Qwen2-VL v2 chat template pattern: build the
+    # user-turn as a list of content blocks (one per modality),
+    # apply_chat_template to render it into the canonical prompt
+    # string with `<|im_start|>user ... <|im_end|>` markers +
+    # image placeholder tokens, then pass the rendered string +
+    # the raw PIL image through the processor.
+    if (
+        tokenizer is not None
+        and processor is not None
+        and hasattr(tokenizer, "apply_chat_template")
+    ):
+        try:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": prompt},
+                    ],
+                },
+            ]
+            text_prompt = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            inputs = processor(
+                text=[text_prompt],
+                images=[image],
+                return_tensors="pt",
+                padding=True,
+            ).to(device)
+            with torch.no_grad():
+                output_ids = model.generate(**inputs, **gen_kwargs)
+            # Trim the prompt tokens from the output so decoding
+            # returns only the new generation.
+            input_len = inputs["input_ids"].shape[1]
+            new_tokens = output_ids[:, input_len:]
+            text = tokenizer.decode(
+                new_tokens[0], skip_special_tokens=True,
+            ).strip()
+            if text:
+                return text
+            print("  apply_chat_template path returned empty text")
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"  apply_chat_template path failed: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    # ---- Strategy 1b: tokenizer.from_list_format + generate() ----
+    # If model.chat isn't present but the tokenizer has
+    # from_list_format, we can build the query manually and call
+    # model.generate.  This path skips the convenience wrapper but
+    # still uses the correct Qwen-VL prompt structure.
     if (
         image_path is not None
         and tokenizer is not None
