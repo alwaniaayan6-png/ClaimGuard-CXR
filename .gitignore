@@ -64,6 +64,14 @@ figures/*.pdf
 *.ipynb
 
 # Large data directories
-data/
+# NOTE: `data/` and `indices/` are no longer blanket-ignored. The
+# 2026-04-14 v3 sprint audit found that `data/augmentation/*.py` and
+# `data/preprocessing/*.py` — ~3000 lines of Python source used by
+# Task 2, Task 3, and the existing preprocessing pipeline — had
+# been silently excluded from git history since project inception
+# because of the blanket `data/` rule. Actual binary / large data
+# artifacts are already caught by the file-extension patterns above
+# (*.csv, *.json, *.npy, *.pt, *.pth, *.bin, *.safetensors, *.pkl,
+# *.png, *.jpg, *.dcm, *.ipynb) so removing the directory rules is
+# safe and lets Python source under these paths flow into git.
 checkpoints/
-indices/

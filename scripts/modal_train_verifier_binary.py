@@ -57,8 +57,12 @@ vol = modal.Volume.from_name("claimguard-data", create_if_missing=True)
     volumes={"/data": vol},
 )
 def train_verifier(
-    data_path: str = "/data/verifier_training_data.json",
-    output_dir: str = "/data/checkpoints/verifier_binary_v2",
+    # v3 defaults — v3 training data = v2 taxonomy + 4 new fabrication /
+    # compound perturbation types (fabricate_measurement, fabricate_prior,
+    # fabricate_temporal, compound_2err, compound_3err).  Pass --data-path
+    # and --output-dir explicitly to retrain the v2 checkpoint.
+    data_path: str = "/data/verifier_training_data_v3.json",
+    output_dir: str = "/data/checkpoints/verifier_binary_v3",
     model_name: str = "roberta-large",
     learning_rate: float = 2e-5,
     batch_size: int = 32,  # H100 80GB easily fits batch=32

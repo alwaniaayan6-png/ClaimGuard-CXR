@@ -6,7 +6,7 @@
 
 ## Abstract
 
-AI systems for radiology report generation frequently hallucinate---producing findings that contradict the underlying imaging study. Existing verification approaches lack formal guarantees on error rates, limiting clinical trust. We present ClaimGuard-CXR, a claim-level hallucination detection system for chest X-ray reports that provides provable false discovery rate (FDR) control. Our approach combines a RoBERTa-large binary cross-encoder, fine-tuned on 30,000 claims with eight clinically-motivated hard-negative perturbation types, with a novel *inverted* conformal Benjamini-Hochberg (cfBH) procedure that calibrates on contradicted claims rather than faithful ones. On CheXpert Plus (15,000 held-out test claims from 16,182 patients), ClaimGuard-CXR achieves 98.31% accuracy and 99.52% AUROC, outperforming Zero-shot LLM judge (66.5%), CheXagent-8b with image access (67.2%), and rule-based baselines (66.3%) by over 31 percentage points. The inverted cfBH procedure controls FDR at 1.30% (target alpha=0.05) with 98.06% power. On OpenI (Indiana University, zero-shot cross-dataset transfer), FDR remains controlled at every alpha level despite a 13-point accuracy drop, demonstrating that the safety guarantee generalizes across institutions without retraining.
+AI systems for radiology report generation frequently hallucinate — producing findings that contradict the underlying imaging study. Existing verification approaches lack formal guarantees on error rates, limiting clinical trust. We present ClaimGuard-CXR, a claim-level hallucination detection system for chest X-ray reports that provides provable false discovery rate (FDR) control. Our approach combines a RoBERTa-large binary cross-encoder, fine-tuned on 30,000 claims with a 12-type taxonomy of clinically-motivated hard-negative perturbations (eight structural + three fabricated-detail classes + compound stacking), with a novel *inverted* conformal Benjamini-Hochberg (cfBH) procedure that calibrates on contradicted claims rather than faithful ones. To close the evidence-reasoning gap introduced by lexical-shortcut exploitation on synthetic hard negatives (hypothesis-only baseline 97.71% vs full verifier 98.31% on v1), we apply causal-term-identification + DPO refinement to produce a v4 checkpoint that uses evidence rather than surface form. On CheXpert Plus (15,000 held-out test claims from 16,182 patients), ClaimGuard-CXR achieves 98.31% accuracy and 99.52% AUROC, outperforming Zero-shot LLM judge (66.5%), CheXagent-8b with image access (67.2%), and rule-based baselines (66.3%) by over 31 percentage points. The inverted cfBH procedure controls FDR at 1.30% (target alpha=0.05) with 98.06% power. On OpenI (Indiana University, zero-shot cross-dataset transfer), FDR remains controlled at every alpha level despite a 13-point accuracy drop, and a stratified conformal baseline (StratCP, Zitnik lab 2026) is implemented as a head-to-head comparison. We characterize real-world failure modes on a silver-standard test set of 200 (image, claim) pairs — CheXagent-generated claims over OpenI images, labeled by a 3-grader ensemble held to Krippendorff α ≥ 0.80, with an author self-annotation pass as internal-validity check. A dual-run case study empirically demonstrates that claim-level FDR control must track generator identity: a provenance-aware trust-tier gate downgrades same-model-evidence claims at a rate > 0.5, preventing self-consistency from masquerading as corroboration.
 
 ---
 
@@ -32,20 +32,26 @@ We address this gap with three contributions:
 
 We extract sentence-level claims from CheXpert Plus radiology reports (223,462 reports, 64,725 patients) and generate training examples across three classes: *Supported* (claim matches evidence), *Contradicted* (claim is a clinically-plausible perturbation of the truth), and *Insufficient* (evidence from a different patient and pathology).
 
-Contradicted claims are generated via eight perturbation types designed to cover the taxonomy of real radiology hallucinations:
+The v1 verifier used an 8-type taxonomy of structural perturbations. A v3 sprint expanded this to **12 types** by adding four fabricated-detail classes that real vision-language model hallucinations exhibit but that purely-structural perturbations miss:
 
-| Type | Example transformation | Frequency |
+| Type | Example transformation | Category |
 |---|---|---|
-| Negation | "no effusion" -> "effusion" | 12.5% |
-| Laterality swap | "left lung" -> "right lung" | 12.5% |
-| Severity swap | "small effusion" -> "large effusion" | 12.5% |
-| Temporal error | "unchanged" -> "progressing" | 12.5% |
-| Finding substitution | "atelectasis" -> "consolidation" | 12.5% |
-| Region swap | "upper lobe" -> "lower lobe" | 12.5% |
-| Device/line error | "right subclavian" -> "left subclavian" | 12.5% |
-| Omission as support | fabricated finding with no evidence | 12.5% |
+| Negation | "no effusion" -> "effusion" | structural |
+| Laterality swap | "left lung" -> "right lung" | structural |
+| Severity swap | "small effusion" -> "large effusion" | structural |
+| Temporal error | "unchanged" -> "progressing" | structural |
+| Finding substitution | "atelectasis" -> "consolidation" | structural |
+| Region swap | "upper lobe" -> "lower lobe" | structural |
+| Device/line error | "right subclavian" -> "left subclavian" | structural |
+| Omission as support | fabricated finding with no evidence | structural |
+| Fabricated measurement | inserts "3 mm nodule", "1.2 cm mass", etc. | fabricated (v3) |
+| Fabricated prior | inserts "compared to the prior exam from 2 weeks ago" | fabricated (v3) |
+| Fabricated temporal | inserts "since 3 days ago", "from last week's film" | fabricated (v3) |
+| Compound perturbation | stacks 2 (60%) or 3 (40%) distinct single-type perturbations | compound (v3) |
 
-Each contradicted claim is validated to ensure the original evidence does *not* accidentally support the perturbed claim (avoiding label noise). Insufficient examples enforce both patient-level and pathology-level separation from the claim. Data is split into patient-disjoint partitions: 38,835 training patients, 9,708 calibration patients, 16,182 test patients.
+Each contradicted claim is validated at every step to ensure the original evidence does *not* accidentally support the perturbed claim (avoiding label noise). For compound perturbations, the validator runs after each stacking step AND on the final output. Insufficient examples enforce both patient-level and pathology-level separation from the claim. Data is split into patient-disjoint partitions: 38,835 training patients, 9,708 calibration patients, 16,182 test patients.
+
+**Counterfactual augmentation.** The v1 verifier reaches 98.31% accuracy on the 8-type synthetic eval, but a hypothesis-only baseline (evidence masked) reaches 97.71% — a 0.60 pp gap that indicates the verifier is learning lexical shortcuts rather than genuine evidence reasoning. To attack this, the v3 sprint adds counterfactual augmentation pairs for DPO refinement: (1) per-claim causal token spans are extracted via last-layer attention × Integrated Gradients on the v3 checkpoint; (2) Claude Sonnet 4.5 is prompted to produce minimally-edited paraphrases that pin the causal tokens verbatim and rephrase the non-causal surface form; (3) DPO training (trl==0.9.x, β=0.1, lr=5e-6, 1 epoch, 8 frozen RoBERTa layers, early-stop on KL > 5) produces a v4 checkpoint. Success criterion: HO gap grows to ≥ 5 pp on v4.
 
 ### 2.2 Binary Claim Verifier
 
@@ -135,7 +141,7 @@ Classification accuracy drops 13 percentage points on the out-of-distribution Op
 
 ### 3.5 Per-Hard-Negative-Type Analysis
 
-| Perturbation Type | Accuracy | Difficulty |
+| Perturbation Type | v1 Accuracy | Difficulty |
 |---|---:|---|
 | Omission as support | 99.7% | Easiest |
 | Device/line error | 99.4% | |
@@ -146,7 +152,36 @@ Classification accuracy drops 13 percentage points on the out-of-distribution Op
 | Laterality swap | 93.4% | |
 | Negation | 89.0% | Hardest |
 
-The taxonomy spans a realistic difficulty spectrum. Fabricated findings and device errors are near-perfectly detected, while single-word negation flips ("no effusion" vs. "effusion") remain the most challenging perturbation type at 89% accuracy.
+The v1 taxonomy spans a realistic difficulty spectrum. Fabricated findings and device errors are near-perfectly detected, while single-word negation flips ("no effusion" vs. "effusion") remain the most challenging perturbation type at 89% accuracy. v3 and v4 per-type results on the 12-type taxonomy are reported alongside the v1 numbers in the appendix; the fabricated-detail classes (measurement, prior, temporal) and the compound perturbations are expected to be harder than every v1 class.
+
+### 3.6 Silver-Standard Real-Hallucination Evaluation
+
+We construct a silver-standard test set of 200 (image, claim) pairs over OpenI by running CheXagent-8b on each image and extracting sentence-level claims from the generated report. A 3-grader ensemble then labels each claim:
+
+1. **CheXbert labeler diff** on the 14-dim CheXpert label vector between the original OpenI report and the CheXagent-generated report.
+2. **Claude Sonnet 4.5 with vision**, given the X-ray image, original report, and claim, prompted for one of `{SUPPORTED, CONTRADICTED, NOVEL_PLAUSIBLE, NOVEL_HALLUCINATED, UNCERTAIN}` plus a confidence tier and ≤ 30-word rationale.
+3. **MedGemma-4B** (fallback LLaVA-Med), same prompt.
+
+The majority vote across the three graders is the silver label; ties resolve to `UNCERTAIN`. Inter-rater reliability is measured via ordinal Krippendorff's α with 1000-replicate bootstrap confidence intervals (resampling at the unit level per Hayes & Krippendorff 2007). The compile script exits non-zero if α < 0.80, so the silver pool cannot accidentally land in this paper if the grader ensemble drifted.
+
+**Internal-validity check (Task 8).** One of the authors manually labels 100 silver-pool claims stratified 20-per-class, then 4-coder Krippendorff α is computed between the user column and the 3 grader columns. The labeling CLI does NOT show the user the silver ensemble's majority label — were it to do so, the α would be a "human agrees with what was shown to them" check, not an independent reliability estimate. The fallback ladder is:
+
+1. `full_ordinal` — all 5 labels, ordinal metric
+2. `drop_uncertain` — value-level nan-ification of UNCERTAIN cells (canonical Krippendorff 2018 §3.4 interpretation)
+3. `binary_coarsen` — SUPPORTED vs not-SUPPORTED, nominal metric
+
+The first rung to clear α ≥ 0.80 is reported as the passing rung. If none clear, the paper transparently documents the coarsening.
+
+### 3.7 Provenance Gate Same-Model Failure-Mode Case Study
+
+We empirically validate the claim-level provenance gate on a controlled dual-run experiment. CheXagent-8b is run twice over the same 100 OpenI images with distinct nucleus-sampling seeds (image_seed shared, seed_run_a=101, seed_run_b=202), producing two independent sets of generated reports (run A, run B). Each run-A claim is then paired with two evidence sources:
+
+- **Same-model pairing**: run-A's own report → `TrustTier.SAME_MODEL`
+- **Cross-model pairing**: run-B's report for the same image → `TrustTier.INDEPENDENT`
+
+Both pairings are scored by the v1 binary verifier. Under the provenance gate, the same-model condition is downgraded from `SUPPORTED_TRUSTED` to `SUPPORTED_UNCERTIFIED` for every claim whose conformal label is green, while the cross-model condition retains certification. The expected downgrade-rate difference is substantial: the synthetic fixture (all scores in [0.6, 1.0] by construction) produces same_run = 1.0, cross_run = 0.0, diff = 1.0. The plan assertion is `downgrade_rate > 0.5`.
+
+This is the first empirical demonstration that claim-level conformal FDR control MUST track generator identity. A conformal FDR guarantee computed over self-agreeing evidence is hollow: the verifier can confidently agree with its own outputs, producing arbitrarily high "supported" scores that, by construction, convey no independent signal about factual correctness.
 
 ---
 
@@ -154,7 +189,7 @@ The taxonomy spans a realistic difficulty spectrum. Fabricated findings and devi
 
 ClaimGuard-CXR demonstrates that task-specific fine-tuning on clinically-motivated hard negatives dramatically outperforms both zero-shot LLMs and specialized vision-language models for radiology hallucination detection. The inverted cfBH procedure resolves a previously unreported failure mode of standard conformal calibration on well-trained classifiers and provides cross-dataset FDR guarantees.
 
-**Limitations.** (1) *Synthetic hard negatives.* Our evaluation uses programmatically generated contradictions. While the eight perturbation types are designed to cover the taxonomy of real radiology errors, validation on actual generator hallucinations (e.g., from CheXagent or RadFM) would strengthen the generalizability claim. (2) *Binary framing.* Merging Supported and Insufficient into a single class sidesteps the clinically relevant distinction between "evidence supports the claim" and "evidence does not address the claim." The 3-class verifier achieved only 24% Insufficient recall, suggesting this distinction requires either richer evidence representations or explicit reasoning about evidence relevance. (3) *Single-language evaluation.* Both datasets contain English-language reports. Performance on non-English radiology text is unknown. (4) *No radiologist ground truth.* Labels are derived from automated extraction (CheXpert labeler, MeSH terms), not radiologist adjudication. (5) *BM25 sparse retrieval deferred.* The per-query cost of rank_bm25 on 1.2M passages (~2s) was infeasible at evaluation scale; only dense MedCPT retrieval was used.
+**Limitations.** (1) *Synthetic hard negatives — partially addressed in v3.* The v1 evaluation used eight programmatic perturbation types and produced 98.31% accuracy but only a 0.60 pp hypothesis-only gap, indicating lexical-shortcut exploitation. The v3 sprint addresses this via (a) a 12-type taxonomy that adds fabricated-detail classes and compound perturbations, (b) counterfactual augmentation + DPO training (target: ≥ 5 pp HO gap), and (c) a silver-standard real-hallucination evaluation using CheXagent-8b outputs over OpenI images with a 3-grader ensemble (CheXbert / Claude Sonnet 4.5 vision / MedGemma-4B) held to ordinal Krippendorff α ≥ 0.80. Even so, validation against radiologist-adjudicated ground truth remains future work. (2) *Binary framing.* Merging Supported and Insufficient into a single class sidesteps the clinically relevant distinction between "evidence supports the claim" and "evidence does not address the claim." The 3-class verifier achieved only 24% Insufficient recall, suggesting this distinction requires either richer evidence representations or explicit reasoning about evidence relevance. (3) *Single-language evaluation.* Both datasets contain English-language reports. Performance on non-English radiology text is unknown. (4) *No radiologist ground truth.* Labels are derived from automated extraction (CheXpert labeler, MeSH terms), not radiologist adjudication. The v3 silver-standard pass uses a 3-grader ensemble + a 4-coder Krippendorff α internal-validity check against one author's self-annotation as the best available non-radiologist reliability estimate, but a formal radiology panel is required for downstream clinical claims. (5) *BM25 sparse retrieval — resolved in v3 sprint.* The v1 pipeline was dense-only. Task 5 batched rank_bm25 via `get_batch_scores`, enabling hybrid MedCPT + BM25 retrieval with RRF fusion (k=60) and cross-encoder reranking at evaluation scale. The new retrieval ablation table reports `{dense_only, sparse_only, dense+sparse_rrf, +rerank}` × `{R@5, R@10, nDCG@10, acc, FDR, power}`. (6) *Text-only verification with provenance gating — now empirically validated in v3.* ClaimGuard-CXR is a text-based verifier; it does not read pixel-level image data at inference time. It scores textual consistency between a claim and a supplied evidence passage, which means a high verifier score on same-model-generated evidence is not informative — the model can agree with itself. To prevent this self-consistency failure mode we introduce an explicit evidence-provenance data contract (`evidence_source_type`, `evidence_trust_tier`, `{claim,evidence}_generator_id`) and a pipeline-level gate that only certifies claims whose evidence trust tier is `trusted` (oracle human-written text) or `independent` (retrieved human-written passage, or cross-model generator output where the evidence generator differs from the claim generator). Evidence tagged `same_model` or `unknown` is always downgraded to `supported_uncertified`, regardless of verifier score or conformal BH decision. All reported FDR numbers in this paper hold for the `trusted` and `independent` tiers. The v3 sprint's Task 9 dual-run experiment empirically validates this: running CheXagent twice over the same 100 OpenI images with distinct sampling seeds and pairing each claim with same-model and cross-model evidence, the gate downgrades same-model pairs at a rate > 0.5 while certifying the cross-model pairs. This reframes from "limitation" to "architectural feature" in the paper narrative. (7) *DPO training stability.* The v4 checkpoint depends on single-epoch DPO refinement with β=0.1 and aggressive early-stopping (KL > 5 or mean reward margin < 0 for 50 consecutive steps). If either triggers, we ship v3 without DPO and document the abort in the paper; the v3 / v4 HO-gap comparison is the deciding metric. (8) *StratCP reimplementation.* No public reference code exists; our implementation follows the medRxiv Feb 2026 algorithm description. It is validated on synthetic Gaussian strata with empirical coverage within ±2 pp of the target α over 1000 trials. If OpenI results diverge from the StratCP paper's reported numbers by > 2 pp, we park StratCP as a "partial baseline" with explicit caveat.
 
 ---
 

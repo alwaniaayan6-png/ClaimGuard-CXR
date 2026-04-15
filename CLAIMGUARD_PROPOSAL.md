@@ -482,6 +482,214 @@ Gradio app on HF Spaces with ZeroGPU. Features:
 
 ---
 
+## V3 ADDENDUM (2026-04-14)
+
+This addendum documents the 9-task sprint executed on top of v2.
+Motivating observation: the v1 RoBERTa-large binary verifier reaches
+**98.31% test accuracy** on the synthetic eval, but a hypothesis-only
+baseline (evidence masked) reaches **97.71%** — meaning most of the
+reported accuracy is driven by one-token lexical shortcuts in the
+8-type hard-negative taxonomy, not by genuine evidence reasoning.
+The sprint transforms the paper from "we built a verifier and
+evaluated it on synthetic data" into "we built a verifier,
+characterized its failure modes on silver-standard real data, and
+extended it to cover more of the real hallucination space."
+
+Sprint plan lives at `/Users/aayanalwani/.claude/plans/rosy-discovering-bubble.md`.
+Budget: $900 cap. Actual projected spend: ~$79 of compute across
+Tasks 1/2/3/9, leaving ~$821 buffer for re-runs. No radiologist
+annotation — the internal-validity check uses Krippendorff's α
+between the 3-grader silver ensemble and a user self-annotation pass
+on 100 stratified claims.
+
+### V3.1 Extended hard-negative taxonomy (Task 2)
+
+8 → **12** hard-negative types. Four new types:
+
+| # | Name | Class of real hallucination |
+|---|---|---|
+| 9  | `fabricated_measurement` | VLM invents a measurement ("3 mm nodule") not in the original claim |
+| 10 | `fabricated_prior`       | VLM invents a prior study ("compared to the prior exam from 2 weeks ago") |
+| 11 | `fabricated_temporal`    | VLM invents a relative timestamp ("since 3 days ago") |
+| 12 | `compound_perturbation`  | Stacks 2 (60%) or 3 (40%) distinct single-type perturbations with per-step validators |
+
+Retrained v3 checkpoint at `/data/checkpoints/verifier_binary_v3/`;
+re-ran the hypothesis-only baseline to check whether the HO gap
+persists under the broader taxonomy (surfaced explicitly in the
+paper regardless of result).
+
+### V3.2 Counterfactual augmentation + DPO (Task 3)
+
+Implements the ACL 2025 "Dually Self-Improved" recipe:
+1. **Causal term identification** via last-layer attention × Integrated
+   Gradients (captum) on the v3 checkpoint — returns ranked causal
+   spans per contradicted claim.
+2. **Counterfactual generation** via Claude Sonnet 4.5, prompted to
+   produce minimally-edited paraphrases that preserve the causal
+   tokens verbatim and rephrase the non-causal surface form.
+3. **DPO refinement** via `trl.DPOTrainer` (β=0.1, lr=5e-6, 1 epoch,
+   gradient clip 1.0, freeze first 8 RoBERTa layers, early-stop on
+   KL > 5 or mean reward margin < 0 for 50 consecutive steps).
+
+Produces a v4 DPO checkpoint at
+`/data/checkpoints/verifier_binary_v4_dpo/`. Success criterion: the
+HO-baseline gap grows from 0.60 pp to **≥ 5 pp** on v4, meaning the
+model now uses evidence rather than surface form.
+
+### V3.3 Silver-standard real-hallucination evaluation (Task 1)
+
+First real-world test set for ClaimGuard, built without radiologist
+annotation via a 3-grader ensemble:
+- **CheXbert labeler diff** on CheXpert's 14-pathology vector between
+  the original OpenI report and the CheXagent-generated report
+- **Claude Sonnet 4.5 with vision**, given the X-ray image + claim +
+  original report, prompted for one of
+  `{SUPPORTED, CONTRADICTED, NOVEL_PLAUSIBLE, NOVEL_HALLUCINATED,
+  UNCERTAIN}` + confidence + ≤ 30-word rationale
+- **MedGemma-4B** (fallback LLaVA-Med / CXR-LLaVA), same prompt
+
+200 OpenI images, grader majority vote per (image, claim), ordinal
+Krippendorff α with 1000-bootstrap CI. Acceptance threshold **α ≥ 0.80**.
+The compile script exits non-zero if the threshold is not met, so the
+silver pool cannot accidentally land in the paper if the graders
+drifted. Comparison to RadFlag (Chen et al. 2025) 73% precision is the
+headline baseline.
+
+### V3.4 Self-annotation internal-validity check (Task 8)
+
+The user manually labels 100 silver-pool claims stratified 20-per-class
+over the 5-class ordinal scale, then `compute_user_vs_ensemble_alpha.py`
+computes 4-coder Krippendorff α (3 silver graders + user) with a
+three-rung fallback ladder per the plan:
+
+1. `full_ordinal` — all 5 labels, ordinal metric
+2. `drop_uncertain` — value-level nan-ification of UNCERTAIN codings
+   (canonical Krippendorff 2018 §3.4 interpretation)
+3. `binary_coarsen` — SUPPORTED vs not-SUPPORTED, nominal metric
+
+The first rung to clear α ≥ 0.80 is the "passing rung" reported in
+the paper. If none clear, the paper transparently documents the
+coarsening.
+
+**Methodology critical.** The labeling CLI does NOT show the user the
+silver graders' majority label or individual grader outputs — if the
+user were primed by the ensemble, the resulting α would be a
+"human-agrees-with-what-was-shown" check, not an independent
+reliability estimate. Two regression tests lock this.
+
+Drop counts for silent alignment failures (missing claim id /
+no silver match / invalid user label / silver row with no valid grader
+columns) are surfaced in the output JSON so any upward-bias source is
+visible to reviewers.
+
+### V3.5 Provenance-gate same-model failure-mode case study (Task 9)
+
+Empirically validates the existing provenance-aware trust-tier gate
+(`inference/provenance.py`, 36/36 tests) on a real scenario. Runs
+CheXagent twice over the **same 100 OpenI images** with distinct
+sampling seeds (runs A and B), pairs each run-A claim with run-A
+evidence (same-model) and run-B evidence (cross-model), and measures
+the downgrade rate under the gate.
+
+Expected result: the verifier scores both pairings as "supported"
+because the claim and evidence come from the same distribution, but
+the gate downgrades the same-model pairs to `SUPPORTED_UNCERTIFIED`
+at a rate > 0.5 while certifying the cross-model pairs as
+`SUPPORTED_TRUSTED`. Novel and publishable — frame as a contribution,
+not a limitation. This is the first empirical demonstration that
+claim-level certification MUST track generator identity; a
+conformal FDR guarantee over self-agreeing evidence is
+epistemically hollow.
+
+### V3.6 Retrieval pipeline upgrade (Task 5)
+
+Replaced dense-only MedCPT retrieval with batched hybrid retrieval:
+`models/retriever/bm25_index.py::search_batch` (vectorized via
+`get_batch_scores` + `np.argpartition`), RRF fusion (k=60), top-20
+candidates reranked by `cross-encoder/ms-marco-MiniLM-L-12-v2`
+cross-encoder (`rerank_batch` flattens all (query, passage) pairs into
+one GPU pass). New ablation table:
+`{dense_only, sparse_only, dense+sparse_rrf, +rerank}` ×
+`{R@5, R@10, nDCG@10, acc, FDR, power}`.
+
+### V3.7 Recalibrated cross-dataset + StratCP baseline (Task 6)
+
+OpenI evaluation extended with (a) patient-level 50/50 calibration /
+test split + per-pathology FDR and power (b) StratCP (Zitnik lab,
+medRxiv Feb 2026) implemented as a comparison baseline. StratCP is a
+stratified quantile conformal predictor (per-stratum quantile, not BH)
+and lives in `inference/stratcp.py` (31/31 tests). Validation:
+synthetic Gaussian fixture with known coverage — assert empirical
+coverage within ±2 pp of α over 1000 trials. Paper reports StratCP
+vs cfBH head-to-head in `results/stratcp_vs_cfbh.csv`.
+
+### V3.8 LLM claim extractor wired in + fidelity metrics (Task 7)
+
+`LLMClaimExtractor.extract_claims()` (already implemented but unused)
+is now wired into both `scripts/prepare_eval_data.py` (behind
+`--use-llm-extractor`) and `demo/app.py`. New evaluation:
+`evaluation/extractor_fidelity.py` computes BLEU-4 / BERTScore-F1 /
+NLI entailment fraction between LLM-extracted and rule-based-extracted
+claims on 500 reports, with a round-trip check that re-concatenated
+claims match the original report.
+
+### V3.9 Post-hoc regex error annotator (Task 4, demoted)
+
+**Diagnostic metadata only — never changes triage labels.** Regex
+patterns in `evaluation/regex_error_annotator.py` flag structural
+hallucination classes (fabricated measurements, fabricated priors,
+fabricated dates, relative-time markers) on every silver pool and
+OpenI eval row. Flags land in the per-claim CSV for the paper's
+error-analysis tables. False-positive risk in medical text is too
+high to use regex as a gate — this is explicitly framed as an
+annotator, not a classifier.
+
+### V3 Updated Evaluation table
+
+Metrics added beyond the v2 table:
+
+| Metric | Source | Rung |
+|---|---|---|
+| Silver-standard α (3-grader ensemble) | Task 1 | Accept if ≥ 0.80 |
+| 4-coder α (silver + user self-annotation) | Task 8 | First fallback rung to pass |
+| Per-pathology OpenI FDR (14 classes) | Task 6 | ≤ α at each level |
+| StratCP vs cfBH head-to-head | Task 6 | Coverage + power comparison |
+| Hypothesis-only gap (v1 / v3 / v4) | Task 3 | ≥ 5 pp on v4 |
+| HO ablation on counterfactual pairs | Task 3 | Validates causal learning |
+| Same-model downgrade rate | Task 9 | > 0.5 |
+| Provenance-gate certification rate (per tier) | `modal_run_evaluation.py` | Documented per tier |
+| Retrieval ablation table | Task 5 | R@k, nDCG, acc, FDR, power |
+| Extractor fidelity (BLEU / BERTScore / NLI) | Task 7 | Reported as context |
+
+### V3 Updated Known Limitations
+
+Adding to the existing 10 limitations:
+
+**11. Synthetic-real distribution shift.** Silver-standard graders are
+themselves LLMs / rule-based labelers, not radiologists. Krippendorff
+α between the graders and the user self-annotation is the best
+internal check we have without a formal radiology panel. We document
+this explicitly and caveat that peer review will want a downstream
+radiologist study.
+
+**12. DPO training stability.** Early-stop conditions (KL > 5, reward
+margin < 0 for 50 consecutive steps) are empirical and plan-defensive —
+if they trigger, we ship v3 without DPO and document in the paper.
+
+**13. StratCP reimplementation risk.** No public reference code;
+implemented from the medRxiv algorithm description. Validated on
+synthetic Gaussian strata (empirical coverage within ±2 pp of α over
+1000 trials). If our implementation diverges from the paper's OpenI
+numbers by > 2 pp, we park as "partial baseline" with caveat.
+
+**14. Same-model certification limit (now a contribution).** A
+conformal FDR guarantee over self-agreeing evidence is hollow. The
+provenance gate refuses to certify in this case. Task 9 is the
+empirical demonstration. This reframes from "limitation" to
+"architectural feature" in the paper narrative.
+
+---
+
 ## Reproducibility
 
 Code, trained verifier weights, configuration files, and exact data split patient ID lists will be released. All hyperparameters, random seeds, and training details are specified above. The release will include a clear statement that this is a research prototype not intended for clinical use.

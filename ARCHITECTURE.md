@@ -288,15 +288,19 @@ The grounding module produces heatmaps used for:
 
 ## 5. Component 4: Evidence Retriever
 
-> **Status (2026-04-05):** Wired into the eval pipeline as the retrieval-augmented
-> ablation. Main results table uses oracle (same-report) evidence to isolate
-> verifier quality. Retrieval ablation replaces oracle evidence with top-2
-> passages retrieved from the 1.2M-passage training-patient index via
-> **MedCPT dense retrieval only** (FAISS IVF-Flat, inner-product on L2-
-> normalized vectors). BM25 index is built (`scripts/modal_build_index.py`)
-> but NOT used at eval time: rank_bm25's per-query cost of O(corpus) (~2s
-> for 1.2M passages) made hybrid retrieval infeasible for 30K eval claims.
-> BM25 reranking/hybrid fusion deferred as future work. See
+> **Status (2026-04-14, updated for Task 5 sprint):** The eval pipeline
+> now uses a **batched hybrid retriever** — MedCPT dense + BM25 sparse
+> fused via reciprocal-rank fusion (k=60), then a cross-encoder reranker
+> selects the top-2 passages. BM25 is now feasible at eval time because
+> `models/retriever/bm25_index.py` exposes a batched
+> `search_batch(queries, top_k)` that amortizes `get_batch_scores` over
+> the full eval set in a single vectorized pass (replaces the per-query
+> O(corpus) path that blocked this in 2026-04-05). The reranker
+> (`models/retriever/reranker.py`, `cross-encoder/ms-marco-MiniLM-L-12-v2`)
+> exposes `rerank_batch(query_passage_pairs, batch_size=64)` that flattens
+> candidate pairs across queries into a single GPU pass then regroups.
+> Task 5 ablation table compares `{dense_only, sparse_only, dense+sparse_rrf,
+> +rerank}` × `{R@5, R@10, nDCG@10, acc, FDR, power}`. See
 > `scripts/modal_build_retrieval_eval.py`.
 
 ### Dense Retriever: MedCPT
@@ -328,12 +332,17 @@ The grounding module produces heatmaps used for:
 | k parameter | 60 (standard) |
 | Formula | score(d) = sum over rankers r of 1/(k + rank_r(d)) |
 
-### Reranker (optional, future work)
+### Reranker (ACTIVE — Task 5)
 
-A RoBERTa-large cross-encoder reranker is implemented in
-`models/retriever/reranker.py` but is NOT applied in the current eval
-pipeline — the top-2 passages from RRF fusion are fed directly to the
-verifier. Reranker ablation deferred.
+`models/retriever/reranker.py` uses the
+`cross-encoder/ms-marco-MiniLM-L-12-v2` MS-MARCO cross-encoder (kept, NOT
+swapped to DeBERTa per the sprint plan — the MiniLM model retains a
+favourable latency/accuracy trade-off for radiology passages and the
+BEIR numbers hold up on medical text). The `rerank_batch` path flattens
+`(query, passage)` pairs across the full eval set into one GPU forward
+pass, regroups the scores back to per-query lists, and the top-2
+passages feed the verifier. This replaces the prior "top-2 from RRF
+fusion directly" path.
 
 ### Top-K selection
 - **Top-K = 2 passages per claim** (fed directly to verifier as concatenated evidence)
@@ -398,10 +407,17 @@ Fused [text_cls; zero_heatmap_feat] (1792)
 Note: `zero_heatmap_feat` is a 768-dim zero vector (no grounding heatmaps available).
 The score head and contrastive projection head exist in code but are unused.
 
-### Hard Negative Types (8) — Clinically Motivated
+### Hard Negative Types (12) — Clinically Motivated
 
-Canonical generator: `scripts/prepare_eval_data.py::generate_hard_negative()` (used for
-BOTH training and eval in v2 to guarantee distribution match).
+Canonical generator lives in `data/augmentation/hard_negative_generator.py`
+and is reused by `scripts/prepare_eval_data.py::generate_hard_negative()`
+(used for BOTH training and eval to guarantee distribution match).
+
+The taxonomy was expanded from 8 → 12 types in the Task 2 sprint (v3
+checkpoint) to broaden real-world coverage. The four additions target
+fabricated-detail classes that the original taxonomy missed, and that a
+literature review (Chen et al. 2025 RadFlag, HalluGuard) identified as
+distinct from the 8-class structural perturbations.
 
 | # | Implementation name | Construction | Clinical Motivation | Constraint |
 |---|---|---|---|---|
@@ -413,11 +429,24 @@ BOTH training and eval in v2 to guarantee distribution match).
 | 6 | `region_swap` | Anatomical region swap (upper↔lower, apical↔basal) | Wrong-anatomy errors | Non-laterality anatomy only |
 | 7 | `device_line_error` | Support device mispositioned (ETT in mainstem, etc.) | Ventilation adequacy | Only claims mentioning device keywords |
 | 8 | `omission_as_support` | Fabricated claim about finding NOT in report | Unnecessary procedures | Sampled from `FABRICATION_FINDINGS` |
+| 9 | `fabricated_measurement` | Insert a plausible measurement ("3 mm nodule", "1.2 cm mass") not present in the original claim | VLM hallucination class; inflates urgency | Drawn from `FABRICATED_MEASUREMENT_UNITS` |
+| 10 | `fabricated_prior` | Insert "compared to the prior exam from …" / "since the previous study …" phrasing | Fabricates a prior study that doesn't exist | Drawn from `FABRICATED_PRIOR_PHRASES` |
+| 11 | `fabricated_temporal` | Insert an explicit relative timestamp ("since 3 days ago", "from last week's film") | Fabricates a temporal comparison anchor | Drawn from `FABRICATED_TEMPORAL_DATES` |
+| 12 | `compound_perturbation` | 2-error (60%) / 3-error (40%) stacking of distinct single-type perturbations | Real hallucinations often combine structural + fabricated errors | Rejected if any step returns None or if `_evidence_supports_claim_text` still holds after stacking |
 
-**Label-correctness validators (v2):**
+**Label-correctness validators (v3, carried over from v2):**
 - C5 fix: "Insufficient Evidence" pairs enforce different patient AND different pathology
 - C6 fix: `_evidence_supports_claim_text` rejects contradicted pairings where the
   perturbed claim is still supported by its original evidence
+- Compound path applies validators at EACH step, then one final check on the stacked output
+
+**Hypothesis-only baseline gap (Task 3 motivation):** the v1 verifier on
+the 8-type eval set achieves 98.31% accuracy, but a hypothesis-only
+baseline (evidence masked) reaches **97.71%** — a 0.60 pp gap that
+indicates the verifier is exploiting one-token lexical shortcuts in the
+synthetic hard negatives rather than genuine evidence reasoning.
+**Task 3 (counterfactual augmentation + DPO)** is designed to push this
+gap to ≥ 5 pp on the v4 checkpoint; see §13.2 below.
 
 ### Difficulty Curriculum
 
@@ -765,6 +794,197 @@ Split MIMIC-CXR by admission year. Calibrate on years [2011-2014], test on years
 - Observed FDR among green claims vs nominal alpha
 - Coverage (fraction of test claims labeled green)
 - Degradation magnitude
+
+---
+
+## 13. Sprint Additions (Tasks 1, 3, 8, 9)
+
+This section documents the pieces added in the 2026-04-14 sprint
+(see `/Users/aayanalwani/.claude/plans/rosy-discovering-bubble.md`).
+Each subsection is a pointer to the implementation file(s) + a
+summary of what the code does and why. The pure-helper unit tests
+for every subsection run on CPU without torch/Modal.
+
+### 13.1 Provenance-aware trust-tier gate (existing code, newly documented)
+
+**Purpose.** A conformal "supported" verdict is only epistemically
+meaningful when the evidence and the claim come from **independent
+sources**. If the evidence was produced by the same generator that
+produced the claim, "supported" degenerates into "the model agrees
+with itself" — useless for certification. The provenance gate refuses
+to emit `SUPPORTED_TRUSTED` in that case and downgrades to
+`SUPPORTED_UNCERTIFIED` instead.
+
+**Files.**
+- `inference/provenance.py` (389 lines, 36/36 tests): `EvidenceSourceType`,
+  `TrustTier`, `ProvenanceTriageLabel`, `classify_trust_tier`,
+  `apply_provenance_gate`, `apply_provenance_gate_batch`,
+  `summarize_by_trust_tier`, `default_provenance`, `ensure_provenance_fields`,
+  `is_certifiable`.
+- `inference/conformal_triage.py`: `TriageResult` carries `trust_tier` and
+  `final_label`; `gate_triage_with_provenance()` glues cfBH + provenance.
+- `scripts/modal_run_evaluation.py` (lines 212–654): the gate is wired
+  INLINE in the eval pipeline (not via `gate_triage_with_provenance`);
+  `full_results.json` emits `provenance_gate` + `per_trust_tier` dicts.
+
+**Trust tier rules for `EvidenceSourceType.GENERATOR_OUTPUT`:**
+- `claim_gen == evidence_gen` (or either is None) → `SAME_MODEL`
+- distinct non-empty ids → `INDEPENDENT`
+- A human-curated evidence source → `TRUSTED` (overrides anything else)
+- `CERTIFIABLE = {TRUSTED, INDEPENDENT}`
+
+**Gate decision table:**
+
+| conformal label | trust tier | final label | `was_overridden` |
+|---|---|---|---|
+| green | TRUSTED / INDEPENDENT | `SUPPORTED_TRUSTED` | False |
+| green | SAME_MODEL / UNKNOWN | `SUPPORTED_UNCERTIFIED` | True |
+| yellow | any | `REVIEW_REQUIRED` | False |
+| red | any | `CONTRADICTED` | False |
+| any | `PROVENANCE_BLOCKED` | `PROVENANCE_BLOCKED` | False |
+
+### 13.2 Counterfactual augmentation + DPO refinement (Task 3)
+
+**Purpose.** Attack the 0.60 pp HO-baseline gap by forcing the verifier
+to learn from **causal** evidence reasoning rather than lexical
+shortcuts. Implements the ACL 2025 "Dually Self-Improved" recipe:
+(a) extract per-claim causal token spans via attention ×
+Integrated-Gradients on the v3 verifier; (b) prompt Claude Sonnet 4.5
+for minimally-edited counterfactual paraphrases that pin the causal
+tokens verbatim and rephrase everything else; (c) train a v4
+checkpoint via DPO (β=0.1, lr=5e-6, 1 epoch, KL early-stop,
+freeze first 8 RoBERTa layers).
+
+**Files.**
+- `data/augmentation/causal_term_identifier.py` (32/32 tests): loads v3,
+  runs `captum.attr.LayerIntegratedGradients` on the last-layer attention
+  over the CLS token, returns ranked `CausalSpan` objects.
+- `data/augmentation/counterfactual_generator.py` (54/54 tests):
+  `CounterfactualGenerator` drives Claude Sonnet 4.5 through an injected
+  transport (default = Anthropic SDK, test stub = callable), parses
+  JSON variants tolerantly, validates causal-token preservation via
+  case-insensitive substring, ranks by Levenshtein distance.
+- `scripts/modal_train_dpo_refinement.py` (29/29 tests, H100 training
+  entry point): `DPOTrainingConfig`, `load_preference_pairs`,
+  `DPOEarlyStopTracker`, `format_reward_histogram`. Uses
+  `trl.DPOTrainer` pinned to `trl==0.9.x`. Runs on the
+  `claimguard-dpo-refinement` app, volume `claimguard-data`.
+
+**Success criterion.** The HO-baseline gap grows from 0.60 pp (v1) to
+≥ 5 pp (v4 DPO) — meaning the v4 verifier now uses evidence rather
+than surface form. See §13.5 for the pass/fail metric.
+
+### 13.3 Silver-standard real-hallucination evaluation (Task 1)
+
+**Purpose.** First real-world measurement of the verifier on
+CheXagent-generated claims grounded in real OpenI images. Replaces
+the synthetic evaluation story — the paper's new headline is
+"how well does ClaimGuard triage REAL VLM hallucinations," not
+"how well does ClaimGuard classify synthetic hard negatives."
+
+**Files.**
+- `scripts/generate_real_hallucinations.py` (Modal H100,
+  `claimguard-real-hallucinations` app): runs CheXagent-8b on N OpenI
+  images, extracts claims via the rule-based decomposer, stamps
+  provenance via `default_provenance(source_type=GENERATOR_OUTPUT,
+  claim_generator_id="chexagent-8b-run-<run_id>",
+  evidence_generator_id="openi_radiologist")`. Supports an optional
+  `image_seed` distinct from `seed` so the same image set can be
+  regenerated with different sampling streams (Task 9 consumes this).
+- `scripts/generate_silver_standard_graders.py` (Modal H100): runs
+  the 3-grader ensemble per (image, claim) — CheXbert labeler diff,
+  Claude Sonnet 4.5 w/ vision, MedGemma-4B (fallback LLaVA-Med).
+- `scripts/compile_silver_standard_results.py` (26/26 tests):
+  computes majority vote, ordinal Krippendorff α with 1000-bootstrap
+  CI, per-grader accuracy vs majority, regex-error flags, optional
+  verifier inference, comparison to RadFlag 73% precision baseline.
+  Exit code 2 if α < `--expect-alpha-min`.
+- `evaluation/krippendorff_alpha.py` (28/28 tests): ordinal Krippendorff
+  with coincidence matrix, ordinal / nominal / interval / ratio metrics,
+  percentile bootstrap CI resampling at the unit level.
+
+**Grader prompt (shared):** see `scripts/generate_silver_standard_graders.py`
+line range for the 5-label scale (`SUPPORTED / CONTRADICTED /
+NOVEL_PLAUSIBLE / NOVEL_HALLUCINATED / UNCERTAIN`) with JSON output
+`{"label": ..., "confidence": "high|medium|low", "rationale": "<=30 words"}`.
+
+### 13.4 Self-annotation pass (Task 8)
+
+**Purpose.** Internal-validity sanity check on the silver pool. The
+user manually labels 100 claims stratified 20-per-class, and
+`compute_user_vs_ensemble_alpha.py` computes 4-coder Krippendorff α
+(3 silver graders + user) with a three-rung fallback ladder:
+
+1. `full_ordinal` — all 5 labels, ordinal metric
+2. `drop_uncertain` — value-level nan-ification of UNCERTAIN codings
+   (canonical Krippendorff 2018 §3.4 interpretation; softer than
+   unit-level drop)
+3. `binary_coarsen` — SUPPORTED vs not-SUPPORTED, nominal metric
+
+**Files.**
+- `scripts/self_annotate_silver_subset.py` (71/71 tests): interactive
+  CLI with dependency-injected `display_image_fn` / `prompt_fn` so the
+  tests drive the loop without a TTY or PIL. Resume-safe via
+  `load_existing_annotations` + `filter_unlabeled`. Atomic writes via
+  tmp + rename after every labeled row.
+- `scripts/compute_user_vs_ensemble_alpha.py` (51/51 tests): pure
+  helpers `align_rows_with_drops`, `build_4coder_matrix`,
+  `drop_uncertain_values`, `drop_uncertain_units`, `build_binary_matrix`,
+  `compute_fallback_ladder`, `format_summary`. Reports drop counts
+  (missing_claim_id / no_silver_match / invalid_user_label /
+  silver_no_valid_graders) so bias sources are visible in the JSON.
+
+**Methodology critical (reviewer-flagged).** The interactive prompt
+MUST NOT leak the silver graders' majority label. If the user sees
+the ensemble's answer before they label, the resulting α is a "human
+agrees with what was shown to them" check, not an independent
+reliability estimate. Two regression tests lock this:
+`test_prompt_does_not_leak_silver_majority` and
+`test_prompt_does_not_leak_grader_labels_even_when_present`.
+
+### 13.5 Same-model failure-mode case study (Task 9)
+
+**Purpose.** Empirically validate the provenance gate (§13.1) by
+running CheXagent twice over the same 100 OpenI images with distinct
+sampling seeds (runs A and B), then pairing each run-A claim with
+(a) run-A's own report as evidence (same-model, tier=SAME_MODEL)
+and (b) run-B's report as evidence (cross-model, tier=INDEPENDENT).
+
+**Expected result.** Both conditions see high verifier "supported"
+scores because the claim and evidence come from the same
+distribution (self-agreement). Under the gate, the same-model pairs
+get downgraded from `SUPPORTED_TRUSTED` to `SUPPORTED_UNCERTIFIED`
+at a high rate; the cross-model pairs retain certification. The
+plan assertion is `downgrade_rate > 0.5` on the same-model condition.
+Synthetic smoke test produces `downgrade_rate = 1.0` (same-run),
+`0.0` (cross-run), `diff = 1.0`.
+
+**Files.**
+- `scripts/demo_provenance_gate_failure.py` (68/68 tests, ~990 lines):
+  three-layer architecture — pure helpers (unit-testable on CPU) →
+  torch helpers (verifier inference on H100) → Modal wrapper. Key
+  helpers: `_conformal_label_from_score` (simplified two-threshold
+  cut, defensible for the demo because downgrade rate is driven by
+  tier classification not threshold value), `_extract_generator_id`
+  (strict — raises on conflicting ids rather than silently keeping
+  the last row's value), `_is_error_sentinel` (drops
+  `[Generation error: ...]` and `[CheXagent unavailable]` rows),
+  `build_gate_demo_row`, `compute_gate_demo_stats`,
+  `pair_claims_with_evidence` (enforces image intersection so
+  same_run and cross_run share a common denominator),
+  `_sanity_check_verifier` (post-load probe that catches silent
+  head-weight load failures — 2 probe pairs with opposite-polarity
+  evidence, raises RuntimeError if the margin is < 0.1).
+
+**Architecture note (reviewer fix).** Generation is launched from
+the local entrypoint in `main()` (two sequential `with
+gen_app.run()` blocks for runs A and B). `_run_demo` on H100 does
+ONLY workbook loading + pairing + verifier scoring + persistence.
+The earlier "nested `.remote()` from inside the container" pattern
+was flagged by the reviewer as both fragile (requires a parent
+app.run context the outer container does not own) and wasteful
+(~2× GPU time because the outer container sat idle during the
+inner CheXagent runs).
 
 ---
 

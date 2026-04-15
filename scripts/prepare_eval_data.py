@@ -46,6 +46,13 @@ from data.augmentation.clinical_knowledge import (  # noqa: E402
     get_confusable_finding,
     CHEXPERT_LABEL_NOISE,
 )
+from data.augmentation.hard_negative_generator import (  # noqa: E402
+    MEASUREMENT_TARGET_NOUNS as _MEASUREMENT_TARGET_NOUNS_SHARED,
+)
+from inference.provenance import (  # noqa: E402
+    EvidenceSourceType,
+    default_provenance,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -124,6 +131,87 @@ DEVICE_KEYWORDS = {
     "chest tube", "pigtail",
 }
 
+# =========================================================
+# v3 taxonomy — fabrication vocabularies
+# =========================================================
+# Injected into claims that had no measurement / prior / temporal
+# language in the original text. Attacks the ReXErr 2024 + Chen et al.
+# 2025 failure modes not covered by the 8-type v2 taxonomy.
+FABRICATED_MEASUREMENT_UNITS = [
+    "3 mm", "5 mm", "7 mm", "9 mm",
+    "1.2 cm", "1.5 cm", "1.8 cm", "2.4 cm", "3 cm",
+    "4 x 6 mm", "5 x 8 mm", "1 x 2 cm",
+]
+FABRICATED_PRIOR_PHRASES = [
+    "compared to the prior exam from 2 weeks ago",
+    "since the previous study",
+    "unchanged from the prior film",
+    "stable compared to the comparison exam",
+    "new relative to the most recent comparison",
+    "interval change from the baseline study",
+    "compared with the prior radiograph from last month",
+]
+FABRICATED_TEMPORAL_DATES = [
+    "since 3 days ago",
+    "from last week's study",
+    "compared to yesterday's film",
+    "noted on the prior exam from 2 days ago",
+    "present since the study on 01/12/2026",
+    "new since the admission radiograph",
+    "interval change over the past 48 hours",
+]
+
+# Regex guards — skip fabrication when the claim already has similar text.
+# These mirror the v3.1 broadened patterns in
+# ``data/augmentation/hard_negative_generator.py`` (self-check HIGH #1, #2,
+# #5).  Kept in lockstep so the Claim-based and string-based fabrication
+# paths make the same accept/reject decisions.
+_EXISTING_MEASUREMENT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?"                                 # leading size
+    r"(?:\s*[x×-]\s*\d+(?:\.\d+)?)?"                   # optional x/× dim-2
+    r"\s*[- ]?"                                         # optional separator
+    r"(?:mm|cm|millimeter|centimeter)s?\b",             # unit
+    re.IGNORECASE,
+)
+_EXISTING_PRIOR_RE = re.compile(
+    r"(?:"
+    # Connective + prior/previous/... noun phrase (original behaviour)
+    r"\b(?:compared (?:to|with)|since|from|relative to"
+    r"|interval (?:change|worsening|improvement|development|progression|increase|decrease))"
+    r"\s+(?:the\s+)?(?:prior|previous|last|baseline|comparison|most recent)\b"
+    r"|"
+    # Bare prior/previous/baseline exam/study/film phrase — catches
+    # outputs of fabricate_temporal like "noted on the prior exam"
+    r"\b(?:prior|previous|baseline|comparison)\s+"
+    r"(?:exam|study|film|radiograph|imaging|report|chest x-?ray|cxr)\b"
+    r"|"
+    # Standalone radiology prior-reference idioms
+    r"\b(?:previously\s+(?:noted|seen|described|demonstrated)"
+    r"|in\s+the\s+interim"
+    r"|grossly\s+similar"
+    r"|no\s+(?:significant\s+)?interval\s+change"
+    r"|(?:stable|unchanged)\s+(?:from|compared|since|in\s+the)"
+    r")\b"
+    r")",
+    re.IGNORECASE,
+)
+_EXISTING_TEMPORAL_RE = re.compile(
+    r"\b(?:\d+\s+(?:day|week|month|year)s?\s+ago"
+    r"|yesterday|last\s+(?:week|month|year)"
+    r"|since\s+\d|\d{1,2}/\d{1,2}/\d{2,4}"
+    r"|(?:noted|present|new)\s+(?:on|since|from)\s+(?:the\s+)?"
+    r"(?:prior|previous|baseline)\s+"
+    r"(?:exam|study|film|radiograph))\b",
+    re.IGNORECASE,
+)
+
+# Target nouns onto which a fabricated measurement is grammatically pinned.
+# v3.1: re-exported from ``data.augmentation.hard_negative_generator`` so the
+# Claim-based and string-based fabrication paths cannot drift (self-check
+# MEDIUM #4).  The Claim path prefers observation entities and falls back
+# to this list; the string path uses this list directly.
+_MEASUREMENT_TARGET_NOUNS = list(_MEASUREMENT_TARGET_NOUNS_SHARED)
+
 # Fabrication vocabulary — findings to hallucinate for omission_as_support.
 # Used to create a claim about something the report does NOT mention.
 FABRICATION_FINDINGS = [
@@ -154,10 +242,51 @@ def classify_pathology(claim: str) -> str:
     return "Other"
 
 
-def extract_claims(report: str) -> list[str]:
-    """Extract individual atomic claims from a report section."""
+#: Module-level singleton for the LLM extractor — lazy-loaded the first
+#: time ``extract_claims(report, use_llm_extractor=True)`` is called so a
+#: user can opt in from the CLI without paying the Phi-3 load cost when
+#: the flag is off.  Initialised to ``None``; set by
+#: ``_get_llm_extractor`` below.
+_LLM_EXTRACTOR = None
+
+
+def _get_llm_extractor():
+    """Lazily construct the shared ``LLMClaimExtractor`` instance."""
+    global _LLM_EXTRACTOR
+    if _LLM_EXTRACTOR is None:
+        from models.decomposer.llm_claim_extractor import LLMClaimExtractor
+
+        _LLM_EXTRACTOR = LLMClaimExtractor(use_llm=True)
+    return _LLM_EXTRACTOR
+
+
+def extract_claims(
+    report: str,
+    use_llm_extractor: bool = False,
+) -> list[str]:
+    """Extract individual atomic claims from a report section.
+
+    Args:
+        report: Raw report text (``section_impression`` or
+            ``section_findings``) from the CheXpert Plus DataFrame.
+        use_llm_extractor: If True, route through the v2 context-aware
+            ``LLMClaimExtractor`` (Phi-3-mini + rule-based fallback).
+            Default False preserves v1 behaviour.
+
+    Returns:
+        List of claim strings.  Empty list for reports shorter than 10
+        characters or after HISTORY-line filtering.
+    """
     if not report or report == "nan" or len(report) < 10:
         return []
+
+    if use_llm_extractor:
+        extractor = _get_llm_extractor()
+        # LLMClaimExtractor returns list[dict]; we only need the text.
+        return [
+            c["claim"] for c in extractor.extract_claims(report)
+            if c.get("claim")
+        ]
 
     sentences = re.split(r'(?<=[.!?])\s+|\n+', report.strip())
     claims = []
@@ -300,7 +429,109 @@ def generate_hard_negative(
         parts.append(finding)
         return " ".join(parts).capitalize() + "."
 
+    # ---------------------------------------------------------------
+    # v3 taxonomy — fabrication perturbations (types 9–11)
+    # ---------------------------------------------------------------
+    elif neg_type == "fabricate_measurement":
+        # Skip if the claim already has a numeric measurement
+        if _EXISTING_MEASUREMENT_RE.search(claim):
+            return None
+        target_noun = None
+        for noun in _MEASUREMENT_TARGET_NOUNS:
+            if re.search(rf'\b{re.escape(noun)}\b', claim_lower):
+                target_noun = noun
+                break
+        if not target_noun:
+            return None
+        measurement = rng.choice(FABRICATED_MEASUREMENT_UNITS)
+        new_text, n = re.subn(
+            rf'\b{re.escape(target_noun)}\b',
+            f"{measurement} {target_noun}",
+            claim,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if n == 0 or new_text == claim:
+            return None
+        return new_text
+
+    elif neg_type == "fabricate_prior":
+        if _EXISTING_PRIOR_RE.search(claim):
+            return None
+        stripped = claim.rstrip().rstrip(".")
+        if not stripped:
+            return None
+        phrase = rng.choice(FABRICATED_PRIOR_PHRASES)
+        return f"{stripped}, {phrase}."
+
+    elif neg_type == "fabricate_temporal":
+        if _EXISTING_TEMPORAL_RE.search(claim) or _EXISTING_PRIOR_RE.search(claim):
+            return None
+        stripped = claim.rstrip().rstrip(".")
+        if not stripped:
+            return None
+        phrase = rng.choice(FABRICATED_TEMPORAL_DATES)
+        return f"{stripped}, {phrase}."
+
+    # ---------------------------------------------------------------
+    # v3 taxonomy — compound (type 12) — two-error / three-error variants
+    # ---------------------------------------------------------------
+    elif neg_type == "compound_2err":
+        return _compound_perturbation(claim, rng, n_errors=2)
+    elif neg_type == "compound_3err":
+        return _compound_perturbation(claim, rng, n_errors=3)
+
     return None
+
+
+# Deterministic order in which _compound_perturbation tries single-type
+# perturbations.  Mirrors the order used by
+# data/augmentation/hard_negative_generator.py:_COMPOUND_ORDER so the two
+# code paths stay in sync.
+_COMPOUND_SINGLE_TYPES = [
+    "laterality_swap",
+    "finding_substitution",
+    "severity_swap",
+    "temporal_error",
+    "negation",
+    "region_swap",
+    "device_line_error",
+    "fabricate_measurement",
+    "fabricate_prior",
+    "fabricate_temporal",
+]
+
+
+def _compound_perturbation(
+    claim: str, rng: random.Random, n_errors: int,
+) -> str | None:
+    """Chain *n_errors* distinct single-type perturbations on *claim*.
+
+    Returns None if any sub-step fails, if the chained perturbations
+    don't change the text, or if n_errors < 2.
+    """
+    if n_errors < 2:
+        return None
+    # Sample n_errors distinct types; apply in the fixed _COMPOUND_SINGLE_TYPES
+    # order so the result is deterministic given rng state.
+    pool_size = min(n_errors, len(_COMPOUND_SINGLE_TYPES))
+    selected = set(rng.sample(_COMPOUND_SINGLE_TYPES, k=pool_size))
+    ordered = [t for t in _COMPOUND_SINGLE_TYPES if t in selected]
+    if len(ordered) < n_errors:
+        return None
+
+    current = claim
+    changed_any = False
+    for neg_type in ordered:
+        nxt = generate_hard_negative(current, neg_type, rng)
+        if nxt is None or nxt == current:
+            return None
+        current = nxt
+        changed_any = True
+
+    if not changed_any or current == claim:
+        return None
+    return current
 
 
 def _evidence_supports_claim_text(claim: str, evidence_texts: list[str]) -> bool:
@@ -347,8 +578,9 @@ def create_eval_claims(
     n_contradicted: int = 5000,
     n_insufficient: int = 5000,
     seed: int = 42,
+    use_llm_extractor: bool = False,
 ) -> list[dict]:
-    """Create balanced evaluation claim sets with all 8 hard-negative types.
+    """Create balanced evaluation claim sets with all 13 hard-negative types.
 
     Args:
         df: CheXpert Plus DataFrame (filtered to desired split).
@@ -356,12 +588,21 @@ def create_eval_claims(
         n_contradicted: Number of contradicted claims (label=1).
         n_insufficient: Number of insufficient-evidence claims (label=2).
         seed: Random seed.
+        use_llm_extractor: If True, use ``LLMClaimExtractor`` (Phi-3-mini
+            context-aware decomposer) instead of the naive regex
+            sentence splitter.  Routed directly into ``extract_claims``.
 
     Returns:
         List of claim dicts with keys: claim, evidence, label,
         pathology, negative_type, patient_id.
     """
     rng = random.Random(seed)
+
+    if use_llm_extractor:
+        logger.info(
+            "extract_claims: routing through LLMClaimExtractor "
+            "(Phi-3-mini, context-aware)"
+        )
 
     # Extract all claims with their evidence
     all_claims = []
@@ -370,15 +611,17 @@ def create_eval_claims(
         impression = str(row.get("section_impression", ""))
         findings = str(row.get("section_findings", ""))
 
-        report_claims = extract_claims(impression)
+        report_claims = extract_claims(impression, use_llm_extractor=use_llm_extractor)
         if not report_claims:
-            report_claims = extract_claims(findings)
+            report_claims = extract_claims(findings, use_llm_extractor=use_llm_extractor)
 
         for claim in report_claims:
             # Evidence = other sentences from same report
             evidence_pool = [c for c in report_claims if c != claim]
             if findings and findings != "nan":
-                evidence_pool.extend(extract_claims(findings))
+                evidence_pool.extend(
+                    extract_claims(findings, use_llm_extractor=use_llm_extractor)
+                )
 
             all_claims.append({
                 "claim": claim,
@@ -395,21 +638,37 @@ def create_eval_claims(
     supported = rng.sample(all_claims, min(n_supported, len(all_claims)))
     supported_examples = []
     for item in supported:
-        supported_examples.append({
+        example = {
             "claim": item["claim"],
             "evidence": item["evidence"][:2],
             "label": 0,  # Supported
             "pathology": item["pathology"],
             "negative_type": "none",
             "patient_id": item["patient_id"],
-        })
+        }
+        # Provenance: evidence is the same radiologist-written report the
+        # claim was extracted from. Oracle text, trust tier TRUSTED.
+        example.update(default_provenance(
+            source_type=EvidenceSourceType.ORACLE_REPORT_TEXT,
+            claim_generator_id=None,
+            evidence_generator_id=None,
+        ))
+        supported_examples.append(example)
 
     # =========================================================
-    # 2. CONTRADICTED claims (8 hard-negative types)
+    # 2. CONTRADICTED claims (v3 taxonomy — 13 hard-negative types)
     # =========================================================
-    # All 8 types; sampled uniformly. The per-type distribution is
-    # determined by claim eligibility (not every claim supports every
-    # perturbation type) — we accept whatever the data produces.
+    # v2 had 8 single-type perturbations.  v3 adds:
+    #   9. fabricate_measurement  — inject "3 mm" / "1.2 cm" into claims
+    #                                that had no measurement
+    #  10. fabricate_prior        — inject "compared to the prior film"
+    #  11. fabricate_temporal     — inject "since 3 days ago"
+    #  12. compound_2err          — chain 2 distinct single-type perturbations
+    #  13. compound_3err          — chain 3 distinct single-type perturbations
+    # The compound_2err / compound_3err pair is split 60 / 40 per the
+    # realistic-complexity distribution from Chen et al. 2025 — in a
+    # pool of real multi-error radiology claims most have exactly 2
+    # errors, fewer have 3+.
     neg_types = [
         "negation",
         "laterality_swap",
@@ -419,13 +678,39 @@ def create_eval_claims(
         "region_swap",
         "device_line_error",
         "omission_as_support",
+        "fabricate_measurement",
+        "fabricate_prior",
+        "fabricate_temporal",
+        "compound_2err",
+        "compound_3err",
     ]
+    #: Base quota per type = n_contradicted / 13 (even split).  The
+    #: compound pair then gets rebalanced 60/40 of whatever combined
+    #: share it would have received under the even split.
     contradicted_examples = []
     neg_pool = list(all_claims)
     rng.shuffle(neg_pool)
 
-    # Track per-type counts for balanced sampling
-    type_quota = n_contradicted // len(neg_types)
+    # Track per-type counts for balanced sampling.
+    # v3.1 (self-check MEDIUM #3): quota must sum to EXACTLY ``n_contradicted``
+    # — the earlier ``base_quota = n // 13`` formulation lost the floor
+    # remainder, leaking e.g. 8 examples on n=5000. We fold the leftover
+    # into compound_2err, which is the most abundant type.
+    base_quota = n_contradicted // len(neg_types)
+    type_quota: dict[str, int] = {t: base_quota for t in neg_types}
+    # Rebalance compound pair to 60/40 of their combined 2/13 share
+    compound_combined = base_quota * 2
+    type_quota["compound_2err"] = int(round(compound_combined * 0.60))
+    type_quota["compound_3err"] = compound_combined - type_quota["compound_2err"]
+    remainder = n_contradicted - sum(type_quota.values())
+    if remainder > 0:
+        # Absorb the floor-division remainder into the most generator-friendly
+        # bucket (compound_2err has the widest sampling surface).
+        type_quota["compound_2err"] += remainder
+    assert sum(type_quota.values()) == n_contradicted, (
+        f"type_quota sums to {sum(type_quota.values())}, "
+        f"expected {n_contradicted}"
+    )
     type_counts = {t: 0 for t in neg_types}
 
     attempts = 0
@@ -433,8 +718,8 @@ def create_eval_claims(
     rejected_for_support = 0
     while len(contradicted_examples) < n_contradicted and attempts < max_attempts:
         item = neg_pool[attempts % len(neg_pool)]
-        # Prefer under-represented types
-        underrep = [t for t in neg_types if type_counts[t] < type_quota]
+        # Prefer under-represented types (type_quota is a per-type dict in v3)
+        underrep = [t for t in neg_types if type_counts[t] < type_quota[t]]
         neg_type = rng.choice(underrep if underrep else neg_types)
 
         neg_claim = generate_hard_negative(item["claim"], neg_type, rng)
@@ -452,14 +737,23 @@ def create_eval_claims(
             rejected_for_support += 1
             continue
 
-        contradicted_examples.append({
+        example = {
             "claim": neg_claim,
             "evidence": evidence,
             "label": 1,  # Contradicted
             "pathology": item["pathology"],
             "negative_type": neg_type,
             "patient_id": item["patient_id"],
-        })
+        }
+        # Provenance: evidence is still the same radiologist-written oracle
+        # report. The claim is a hard-negative perturbation of the original,
+        # but the evidence itself is trusted oracle text.
+        example.update(default_provenance(
+            source_type=EvidenceSourceType.ORACLE_REPORT_TEXT,
+            claim_generator_id=None,
+            evidence_generator_id=None,
+        ))
+        contradicted_examples.append(example)
         type_counts[neg_type] += 1
 
     logger.info(
@@ -508,14 +802,25 @@ def create_eval_claims(
             # Give up on this claim — skip rather than create bad label
             continue
 
-        insufficient_examples.append({
+        example = {
             "claim": item["claim"],
             "evidence": other["evidence"][:2],
             "label": 2,  # Insufficient Evidence
             "pathology": item["pathology"],
             "negative_type": "mismatched_evidence",
             "patient_id": item["patient_id"],
-        })
+        }
+        # Provenance: evidence comes from a DIFFERENT radiologist-written
+        # report (different patient + different pathology). Still oracle
+        # text, so trust tier TRUSTED — the independence issue we care
+        # about is "same generator wrote both" and neither side was
+        # generated by a model here.
+        example.update(default_provenance(
+            source_type=EvidenceSourceType.ORACLE_REPORT_TEXT,
+            claim_generator_id=None,
+            evidence_generator_id=None,
+        ))
+        insufficient_examples.append(example)
 
     logger.info(f"Generated {len(insufficient_examples)} insufficient-evidence claims")
 
@@ -550,6 +855,15 @@ def main():
     parser.add_argument("--n-claims", type=int, default=5000,
                         help="Number of claims per class")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--use-llm-extractor", action="store_true",
+        help=(
+            "Route claim extraction through LLMClaimExtractor (Phi-3-mini, "
+            "context-aware) instead of the naive regex sentence splitter. "
+            "Default: off, preserving v1 behaviour. Turn on for v3 "
+            "regeneration (adds ~2s/report on CPU)."
+        ),
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -581,6 +895,7 @@ def main():
             n_contradicted=args.n_claims,
             n_insufficient=args.n_claims,
             seed=args.seed,
+            use_llm_extractor=args.use_llm_extractor,
         )
 
         out_file = output_dir / f"{split_name}_claims.json"

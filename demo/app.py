@@ -33,6 +33,14 @@ try:
 except ImportError:
     raise ImportError("Install gradio: pip install gradio>=4.0.0")
 
+from inference.provenance import (  # noqa: E402
+    EvidenceSourceType,
+    ProvenanceTriageLabel,
+    TrustTier,
+    apply_provenance_gate,
+    classify_trust_tier,
+)
+
 # Try ZeroGPU decorator (HF Spaces), fall back to no-op
 try:
     import spaces
@@ -116,15 +124,46 @@ def _load_model():
 # ============================================================
 # Claim extraction
 # ============================================================
+#: Demo-wide lazy singleton for the LLM extractor — loading Phi-3-mini
+#: costs ~5s and ~2 GB, so we only pay it on the first Gradio inference
+#: call (never at import time).  The ``CLAIMGUARD_DEMO_LLM_EXTRACTOR``
+#: env var lets power users flip LLM mode on in hosted environments
+#: without editing code.
+_DEMO_LLM_EXTRACTOR = None
+
+
+def _get_demo_extractor():
+    """Lazy-load a shared ``LLMClaimExtractor`` for the Gradio demo.
+
+    Controlled by the ``CLAIMGUARD_DEMO_LLM_EXTRACTOR`` env var:
+        * ``"1"`` / ``"true"`` / ``"yes"`` → LLM path (Phi-3-mini, CPU).
+        * anything else → rule-based fallback (default — keeps the
+          hosted demo responsive and GPU-free).
+    """
+    global _DEMO_LLM_EXTRACTOR
+    if _DEMO_LLM_EXTRACTOR is not None:
+        return _DEMO_LLM_EXTRACTOR
+    import os
+    from models.decomposer.llm_claim_extractor import LLMClaimExtractor
+
+    use_llm = os.environ.get(
+        "CLAIMGUARD_DEMO_LLM_EXTRACTOR", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    _DEMO_LLM_EXTRACTOR = LLMClaimExtractor(use_llm=use_llm)
+    return _DEMO_LLM_EXTRACTOR
+
+
 def extract_claims(report_text: str) -> list[str]:
     """Extract atomic claims from a radiology report.
 
-    Uses LLM-based contextual extraction when available, with enhanced
-    rule-based fallback that preserves negation/temporal context.
+    Routes through the lazy-loaded demo ``LLMClaimExtractor`` singleton
+    (rule-based by default, LLM-backed when
+    ``CLAIMGUARD_DEMO_LLM_EXTRACTOR=1``).  Falls back to a pure regex
+    splitter if the decomposer module cannot be imported at all (e.g.,
+    offline environments missing ``transformers``).
     """
     try:
-        from models.decomposer.llm_claim_extractor import LLMClaimExtractor
-        extractor = LLMClaimExtractor(use_llm=False)  # Rule-based in demo (no GPU for Phi-3)
+        extractor = _get_demo_extractor()
         results = extractor.extract_claims(report_text)
         return [r["claim"] for r in results] if results else [report_text.strip()]
     except ImportError:
@@ -188,13 +227,42 @@ def verify_claims(claims: list[str], evidence: str = "") -> list[dict]:
 
 
 # ============================================================
-# Conformal triage
+# Conformal triage + provenance gate
 # ============================================================
+# Display strings for the provenance-aware final labels. Kept in one place
+# so the summary panel and the per-claim highlight agree.
+_FINAL_LABEL_DISPLAY = {
+    ProvenanceTriageLabel.SUPPORTED_TRUSTED: "SUPPORTED (trusted)",
+    ProvenanceTriageLabel.SUPPORTED_UNCERTIFIED: "SUPPORTED (uncertified)",
+    ProvenanceTriageLabel.REVIEW_REQUIRED: "REVIEW",
+    ProvenanceTriageLabel.CONTRADICTED: "CONTRADICTED",
+    ProvenanceTriageLabel.PROVENANCE_BLOCKED: "PROVENANCE BLOCKED",
+}
+
+_FINAL_LABEL_COLOR = {
+    ProvenanceTriageLabel.SUPPORTED_TRUSTED: "#22c55e",      # green
+    ProvenanceTriageLabel.SUPPORTED_UNCERTIFIED: "#6b7280",  # gray: cannot certify
+    ProvenanceTriageLabel.REVIEW_REQUIRED: "#eab308",        # yellow
+    ProvenanceTriageLabel.CONTRADICTED: "#ef4444",           # red
+    ProvenanceTriageLabel.PROVENANCE_BLOCKED: "#6b7280",     # gray
+}
+
+
 def conformal_triage(
     claim_results: list[dict],
     alpha: float = 0.05,
+    trust_tier: str = TrustTier.UNKNOWN,
 ) -> list[dict]:
-    """Apply inverted cfBH conformal procedure to assign triage labels."""
+    """Apply inverted cfBH conformal procedure and then the provenance gate.
+
+    Each result dict gets three new fields:
+      - "triage"       : raw green/yellow/red from the conformal step (legacy)
+      - "final_label"  : provenance-aware label (ProvenanceTriageLabel.*)
+      - "display"      : human-readable label string for the UI
+      - "color"        : color corresponding to `final_label`
+      - "trust_tier"   : the tier used for gating
+      - "gate_override": True if a green claim was downgraded by the gate
+    """
     if _CAL_SCORES is None:
         _load_model()
 
@@ -225,14 +293,19 @@ def conformal_triage(
 
     for result in claim_results:
         if result["p_value"] <= bh_threshold and k_star > 0:
-            result["triage"] = "GREEN"
-            result["color"] = "#22c55e"
+            raw = "green"
         elif result["score"] > 0.3:
-            result["triage"] = "YELLOW"
-            result["color"] = "#eab308"
+            raw = "yellow"
         else:
-            result["triage"] = "RED"
-            result["color"] = "#ef4444"
+            raw = "red"
+
+        gate = apply_provenance_gate(raw, trust_tier)
+        result["triage"] = raw.upper()  # legacy field, backward compat
+        result["final_label"] = gate.final_label
+        result["display"] = _FINAL_LABEL_DISPLAY[gate.final_label]
+        result["color"] = _FINAL_LABEL_COLOR[gate.final_label]
+        result["trust_tier"] = gate.trust_tier
+        result["gate_override"] = gate.was_overridden
 
     return claim_results
 
@@ -244,12 +317,42 @@ _CACHED_RESULTS = None  # Cache verification results to avoid GPU re-inference o
 _CACHED_REPORT = None
 
 
-def process_report(report_text: str, alpha: float) -> tuple:
-    """Main processing function: extract claims -> verify -> triage -> display."""
+# Display name -> canonical trust tier for the Gradio dropdown.
+_EVIDENCE_SOURCE_CHOICES = {
+    "Oracle report (trusted)": EvidenceSourceType.ORACLE_REPORT_TEXT,
+    "Retrieved passage (independent)": EvidenceSourceType.RETRIEVED_REPORT_TEXT,
+    "Generator output (same-model risk)": EvidenceSourceType.GENERATOR_OUTPUT,
+    "Unknown provenance": EvidenceSourceType.UNKNOWN,
+}
+
+
+def process_report(
+    report_text: str,
+    alpha: float,
+    evidence_source_display: str = "Oracle report (trusted)",
+) -> tuple:
+    """Main processing function: extract claims -> verify -> triage -> display.
+
+    The `evidence_source_display` argument selects the evidence provenance
+    for the current input, which drives the provenance gate. A real
+    deployment would determine this from the evidence pipeline itself, not
+    from a UI dropdown — the dropdown exists in this demo so judges can
+    actually see the gate in action.
+    """
     global _CACHED_RESULTS, _CACHED_REPORT
 
     if not report_text.strip():
         return [], "Please enter a radiology report.", ""
+
+    # Map the display string to a canonical source_type and then to a tier.
+    source_type = _EVIDENCE_SOURCE_CHOICES.get(
+        evidence_source_display, EvidenceSourceType.UNKNOWN
+    )
+    trust_tier = classify_trust_tier(
+        source_type=source_type,
+        claim_generator_id=None,
+        evidence_generator_id=None,
+    )
 
     # Only re-run GPU inference if report text changed
     if report_text != _CACHED_REPORT or _CACHED_RESULTS is None:
@@ -258,27 +361,39 @@ def process_report(report_text: str, alpha: float) -> tuple:
         _CACHED_RESULTS = results
         _CACHED_REPORT = report_text
     else:
-        # Reuse cached scores, only recompute triage at new alpha
+        # Reuse cached scores, only recompute triage at new alpha / tier
         results = [dict(r) for r in _CACHED_RESULTS]  # shallow copy
 
-    results = conformal_triage(results, alpha=alpha)
+    results = conformal_triage(results, alpha=alpha, trust_tier=trust_tier)
 
-    # Format for HighlightedText
+    # Format for HighlightedText using the provenance-aware display label.
     highlighted = []
     for r in results:
-        highlighted.append((r["claim"] + " ", r["triage"]))
+        highlighted.append((r["claim"] + " ", r["final_label"]))
 
-    # Summary statistics
-    n_green = sum(1 for r in results if r["triage"] == "GREEN")
-    n_yellow = sum(1 for r in results if r["triage"] == "YELLOW")
-    n_red = sum(1 for r in results if r["triage"] == "RED")
+    # Summary statistics by final (provenance-aware) label.
+    n_sup_trusted = sum(1 for r in results if r["final_label"] == ProvenanceTriageLabel.SUPPORTED_TRUSTED)
+    n_sup_uncert = sum(1 for r in results if r["final_label"] == ProvenanceTriageLabel.SUPPORTED_UNCERTIFIED)
+    n_review = sum(1 for r in results if r["final_label"] == ProvenanceTriageLabel.REVIEW_REQUIRED)
+    n_contra = sum(1 for r in results if r["final_label"] == ProvenanceTriageLabel.CONTRADICTED)
+
+    fdr_line = (
+        f"- FDR guarantee: <= {alpha*100:.0f}% of SUPPORTED (trusted) claims are hallucinated"
+        if trust_tier in (TrustTier.TRUSTED, TrustTier.INDEPENDENT)
+        else (
+            f"- **No FDR guarantee**: evidence trust tier is `{trust_tier}`. "
+            f"ClaimGuard only certifies claims when evidence comes from a trusted "
+            f"or independent source. All supported claims shown as UNCERTIFIED."
+        )
+    )
 
     summary = (
-        f"**Results at alpha={alpha}:**\n"
-        f"- GREEN (safe): {n_green} claims\n"
-        f"- YELLOW (review): {n_yellow} claims\n"
-        f"- RED (likely hallucinated): {n_red} claims\n"
-        f"- FDR guarantee: <= {alpha*100:.0f}% of GREEN claims are hallucinated"
+        f"**Results at alpha={alpha}, evidence = {evidence_source_display}, tier = `{trust_tier}`**\n\n"
+        f"- SUPPORTED (trusted): {n_sup_trusted} claims\n"
+        f"- SUPPORTED (uncertified): {n_sup_uncert} claims\n"
+        f"- REVIEW: {n_review} claims\n"
+        f"- CONTRADICTED: {n_contra} claims\n"
+        f"{fdr_line}"
     )
 
     # Detailed table
@@ -286,7 +401,8 @@ def process_report(report_text: str, alpha: float) -> tuple:
     for r in results:
         detail_rows.append([
             r["claim"][:80] + ("..." if len(r["claim"]) > 80 else ""),
-            r["triage"],
+            r.get("display", r["final_label"]),
+            r["trust_tier"],
             f"{r['score']:.4f}",
             f"{r['p_value']:.4f}",
         ])
@@ -294,13 +410,14 @@ def process_report(report_text: str, alpha: float) -> tuple:
     return highlighted, summary, detail_rows
 
 
-# Example reports
+# Example reports. Each row is [report, alpha, evidence_source_display].
 EXAMPLES = [
     [
         "The heart is normal in size. The lungs are clear without focal consolidation, "
         "pleural effusion, or pneumothorax. No acute osseous abnormality. "
         "The mediastinal contours are normal.",
         0.05,
+        "Oracle report (trusted)",
     ],
     [
         "There is a large left-sided pleural effusion with associated compressive "
@@ -308,12 +425,14 @@ EXAMPLES = [
         "Right lung is clear. No pneumothorax. A right subclavian central venous "
         "catheter terminates in the SVC.",
         0.05,
+        "Retrieved passage (independent)",
     ],
     [
         "The heart is severely enlarged. The lungs show bilateral consolidation "
         "consistent with pneumonia. There is a small right pneumothorax. "
         "No pleural effusion is seen. The left lung is clear without opacity.",
         0.10,
+        "Generator output (same-model risk)",
     ],
 ]
 
@@ -329,8 +448,13 @@ def build_demo():
             "### Claim-Level Hallucination Detection for Radiology Reports "
             "with Conformal FDR Control\n\n"
             "Paste a radiology report below. Each claim will be verified and "
-            "color-coded: **GREEN** (safe), **YELLOW** (needs review), "
-            "**RED** (likely hallucinated).\n\n"
+            "color-coded by the **provenance-aware triage**:\n\n"
+            "- **SUPPORTED (trusted)** — verifier accepted AND evidence is from "
+            "a trusted or independent source.\n"
+            "- **SUPPORTED (uncertified)** — verifier accepted but evidence is "
+            "same-model or unknown; ClaimGuard refuses to certify safety.\n"
+            "- **REVIEW** — borderline, needs a clinician to adjudicate.\n"
+            "- **CONTRADICTED** — verifier found the claim inconsistent with evidence.\n\n"
             "*For research demonstration only. Not for clinical use.*"
         )
 
@@ -350,40 +474,57 @@ def build_demo():
                         label="FDR Target (alpha)",
                         info="Lower alpha = stricter, more claims flagged for review",
                     )
+                    evidence_source_input = gr.Dropdown(
+                        choices=list(_EVIDENCE_SOURCE_CHOICES.keys()),
+                        value="Oracle report (trusted)",
+                        label="Evidence provenance",
+                        info=(
+                            "ClaimGuard only certifies claims when evidence is "
+                            "trusted or independent. Same-model or unknown "
+                            "provenance is downgraded to UNCERTIFIED."
+                        ),
+                    )
                     verify_btn = gr.Button("Verify Report", variant="primary")
 
                 with gr.Column(scale=3):
                     highlighted_output = gr.HighlightedText(
                         label="Verified Claims",
                         color_map={
-                            "GREEN": "#22c55e",
-                            "YELLOW": "#eab308",
-                            "RED": "#ef4444",
+                            ProvenanceTriageLabel.SUPPORTED_TRUSTED: "#22c55e",
+                            ProvenanceTriageLabel.SUPPORTED_UNCERTIFIED: "#6b7280",
+                            ProvenanceTriageLabel.REVIEW_REQUIRED: "#eab308",
+                            ProvenanceTriageLabel.CONTRADICTED: "#ef4444",
+                            ProvenanceTriageLabel.PROVENANCE_BLOCKED: "#6b7280",
                         },
                     )
                     summary_output = gr.Markdown(label="Summary")
 
             detail_table = gr.Dataframe(
-                headers=["Claim", "Triage", "Score", "p-value"],
+                headers=["Claim", "Final label", "Trust tier", "Score", "p-value"],
                 label="Detailed Results",
             )
 
             verify_btn.click(
                 fn=process_report,
-                inputs=[report_input, alpha_slider],
+                inputs=[report_input, alpha_slider, evidence_source_input],
                 outputs=[highlighted_output, summary_output, detail_table],
             )
 
-            # Also trigger on alpha slider change
+            # Also trigger on alpha or provenance change
             alpha_slider.change(
                 fn=process_report,
-                inputs=[report_input, alpha_slider],
+                inputs=[report_input, alpha_slider, evidence_source_input],
+                outputs=[highlighted_output, summary_output, detail_table],
+            )
+            evidence_source_input.change(
+                fn=process_report,
+                inputs=[report_input, alpha_slider, evidence_source_input],
                 outputs=[highlighted_output, summary_output, detail_table],
             )
 
             gr.Examples(
                 examples=EXAMPLES,
-                inputs=[report_input, alpha_slider],
+                inputs=[report_input, alpha_slider, evidence_source_input],
                 outputs=[highlighted_output, summary_output, detail_table],
                 fn=process_report,
                 cache_examples=False,

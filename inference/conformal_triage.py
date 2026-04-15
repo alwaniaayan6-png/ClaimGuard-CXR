@@ -3,6 +3,14 @@
 Implements the cfBH procedure (Jin & Candes, JMLR 2023) for controlling
 false discovery rate among accepted (green-labeled) claims, with
 pathology-group-stratified thresholds.
+
+The green/yellow/red label produced here is the purely score-based triage.
+Trust certification (whether a green claim can actually be marked
+"supported_trusted" for a clinician) additionally requires that the
+evidence provenance is trusted or independent. See `inference/provenance.py`
+for the trust-tier policy and `gate_triage_with_provenance` below for the
+post-processing step that combines the conformal label with the provenance
+tier into the final clinician-facing label.
 """
 
 from __future__ import annotations
@@ -14,18 +22,38 @@ from typing import Literal, Optional
 import numpy as np
 from scipy import stats
 
+from .provenance import (
+    ProvenanceGateResult,
+    ProvenanceTriageLabel,
+    TrustTier,
+    apply_provenance_gate,
+)
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class TriageResult:
-    """Result of conformal triage for a single claim."""
+    """Result of conformal triage for a single claim.
+
+    `label` is the score-based green/yellow/red decision from the
+    conformal BH procedure. It is NOT the clinician-facing label — that
+    requires running `gate_triage_with_provenance` to combine this with
+    the evidence trust tier.
+    """
     claim_text: str
     pathology_group: str
     faithfulness_score: float
     conformal_pvalue: float
     label: Literal["green", "yellow", "red"]
     is_accepted: bool  # True if green
+    trust_tier: str = TrustTier.UNKNOWN
+    """Evidence trust tier for this claim. Populated either by the caller
+    or by `gate_triage_with_provenance`. Defaults to UNKNOWN, which the
+    provenance gate treats as non-certifiable."""
+    final_label: Optional[str] = None
+    """Provenance-aware final label (ProvenanceTriageLabel.*). None until
+    the provenance gate has run."""
 
 
 @dataclass
@@ -395,6 +423,53 @@ class ConformalClaimTriage:
         )
 
         return results
+
+
+def gate_triage_with_provenance(
+    results: list[TriageResult],
+    trust_tiers: list[str],
+) -> list[TriageResult]:
+    """Apply the provenance gate to a list of conformal triage results.
+
+    Pairs each `TriageResult` with its `trust_tier` (from the caller's eval
+    data), runs the tier through `apply_provenance_gate`, and populates
+    `result.trust_tier` and `result.final_label` in place. Returns the same
+    list for chaining.
+
+    This is the function every downstream consumer (eval, demo, API) should
+    call to turn a score-based green/yellow/red into a clinician-facing
+    provenance-aware label. The existing `label` field is preserved for
+    analyses that want the raw conformal decision.
+
+    Example:
+
+        results = triager.triage(scores, groups, claim_texts=claims)
+        trust_tiers = [ex["evidence_trust_tier"] for ex in eval_data]
+        results = gate_triage_with_provenance(results, trust_tiers)
+        for r in results:
+            print(r.claim_text, r.final_label, r.trust_tier)
+    """
+    if len(results) != len(trust_tiers):
+        raise ValueError(
+            f"Length mismatch: {len(results)} triage results but "
+            f"{len(trust_tiers)} trust tiers."
+        )
+
+    n_overridden = 0
+    for r, tier in zip(results, trust_tiers):
+        tier_norm = str(tier) if tier is not None else TrustTier.UNKNOWN
+        gate = apply_provenance_gate(r.label, tier_norm)
+        r.trust_tier = gate.trust_tier
+        r.final_label = gate.final_label
+        if gate.was_overridden:
+            n_overridden += 1
+
+    if n_overridden > 0:
+        logger.info(
+            f"Provenance gate downgraded {n_overridden} green claims to "
+            f"supported_uncertified (same-model or unknown provenance)."
+        )
+    return results
 
 
 def compute_fdr(

@@ -207,6 +207,12 @@ def run_evaluation(
     class ClaimDataset(Dataset):
         REQUIRED_FIELDS = ("claim", "evidence", "label", "pathology",
                            "negative_type", "patient_id")
+        # Provenance fields are optional for backward compat with legacy data.
+        # Missing values are backfilled to "unknown", which is the maximally
+        # restrictive tier (never certified safe by the provenance gate).
+        PROVENANCE_FIELDS = ("evidence_source_type", "evidence_is_independent",
+                             "evidence_generator_id", "claim_generator_id",
+                             "evidence_trust_tier")
 
         def __init__(self, claims, tokenizer, max_length):
             # H7 FIX: assert required fields at load time
@@ -236,6 +242,8 @@ def run_evaluation(
                 truncation="only_second",
                 return_tensors="pt",
             )
+            # Backfill provenance tier to "unknown" for legacy records.
+            trust_tier = item.get("evidence_trust_tier", "unknown")
             return {
                 "input_ids": encoding["input_ids"].squeeze(0),
                 "attention_mask": encoding["attention_mask"].squeeze(0),
@@ -243,6 +251,7 @@ def run_evaluation(
                 "pathology": item["pathology"],
                 "negative_type": item["negative_type"],
                 "patient_id": str(item["patient_id"]),  # C7 FIX: coerce to str
+                "trust_tier": str(trust_tier),
             }
 
     def run_inference(claims_path, split_name):
@@ -254,6 +263,7 @@ def run_evaluation(
 
         all_logits, all_scores, all_labels = [], [], []
         all_pathologies, all_neg_types, all_patient_ids = [], [], []
+        all_trust_tiers = []
         with torch.no_grad():
             for batch in tqdm(dataloader, desc=f"Inference ({split_name})"):
                 input_ids = batch["input_ids"].to(device)
@@ -266,6 +276,7 @@ def run_evaluation(
                 all_pathologies.extend(batch["pathology"])
                 all_neg_types.extend(batch["negative_type"])
                 all_patient_ids.extend(batch["patient_id"])
+                all_trust_tiers.extend(batch["trust_tier"])
         return {
             "logits": np.concatenate(all_logits, axis=0),
             "scores": np.concatenate(all_scores, axis=0),
@@ -273,6 +284,7 @@ def run_evaluation(
             "pathologies": np.array(all_pathologies),
             "neg_types": np.array(all_neg_types),
             "patient_ids": np.array(all_patient_ids, dtype=str),
+            "trust_tiers": np.array(all_trust_tiers, dtype=str),
         }
 
     print("\n=== Inference on calibration + test ===")
@@ -555,6 +567,53 @@ def run_evaluation(
         n_y = int((triage == "yellow").sum())
         n_r = int((triage == "red").sum())
 
+        # -------------------------------------------------------------
+        # Provenance-aware gate (see inference/provenance.py).
+        # green + (trusted | independent)  -> supported_trusted
+        # green + (same_model | unknown)   -> supported_uncertified (override)
+        # yellow -> review_required
+        # red    -> contradicted
+        # Non-certifiable provenance cannot be certified safe regardless of
+        # the verifier score or the conformal BH decision. This is a pipeline
+        # policy, not a model change.
+        # -------------------------------------------------------------
+        test_tiers = test_raw["trust_tiers"]
+        certifiable = np.isin(test_tiers, np.array(["trusted", "independent"]))
+        final_label = np.empty(n_test, dtype=object)
+        final_label[:] = "contradicted"
+        final_label[triage == "yellow"] = "review_required"
+        green_mask = triage == "green"
+        final_label[green_mask & certifiable] = "supported_trusted"
+        final_label[green_mask & (~certifiable)] = "supported_uncertified"
+        gate_overrides = int(np.sum(green_mask & (~certifiable)))
+
+        n_sup_trusted = int((final_label == "supported_trusted").sum())
+        n_sup_uncert = int((final_label == "supported_uncertified").sum())
+        n_review = int((final_label == "review_required").sum())
+        n_contra = int((final_label == "contradicted").sum())
+
+        # Per-trust-tier breakdown of the triage + FDR so readers can see
+        # how the gate affects each provenance slice separately.
+        tier_results = {}
+        for tier in sorted(set(test_tiers.tolist())):
+            tier_mask = (test_tiers == tier)
+            tier_n = int(tier_mask.sum())
+            if tier_n == 0:
+                continue
+            tier_green = int((green_mask & tier_mask).sum())
+            tier_final_sup = int(((final_label == "supported_trusted") & tier_mask).sum())
+            tier_false_green = int(
+                ((green_mask & tier_mask) & (test_labels != 0)).sum()
+            )
+            tier_results[tier] = {
+                "n": tier_n,
+                "n_green_pre_gate": tier_green,
+                "n_supported_trusted_post_gate": tier_final_sup,
+                "fdr_pre_gate": (
+                    float(tier_false_green / tier_green) if tier_green > 0 else 0.0
+                ),
+            }
+
         # Per-pathology FDR (on GREEN claims)
         path_fdr = {}
         for group in sorted(set(test_paths.tolist())):  # M5: deterministic
@@ -571,6 +630,10 @@ def run_evaluation(
         print(f"  n_green={n_green} fdr={fdr:.4f} power={power:.4f} "
               f"coverage={coverage_green_frac:.4f} (target alpha={alpha})")
         print(f"  triage: green={n_g} yellow={n_y} red={n_r}")
+        print(f"  provenance gate: supported_trusted={n_sup_trusted} "
+              f"supported_uncertified={n_sup_uncert} "
+              f"review_required={n_review} contradicted={n_contra} "
+              f"(overrides={gate_overrides})")
 
         conformal_results[f"alpha_{alpha}"] = {
             "alpha": alpha,
@@ -581,6 +644,14 @@ def run_evaluation(
             "n_flagged": n_flagged,
             "n_test": n_test,
             "triage_distribution": {"green": n_g, "yellow": n_y, "red": n_r},
+            "provenance_gate": {
+                "supported_trusted": n_sup_trusted,
+                "supported_uncertified": n_sup_uncert,
+                "review_required": n_review,
+                "contradicted": n_contra,
+                "gate_overrides_from_green": gate_overrides,
+            },
+            "per_trust_tier": tier_results,
             "pathology_fdr": path_fdr,
             "per_group_cal_sizes": per_group_cal_sizes,
         }
