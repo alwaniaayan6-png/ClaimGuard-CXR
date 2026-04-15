@@ -590,11 +590,29 @@ def _run_training(config_json: str) -> dict[str, Any]:
 
     Imports torch / transformers lazily so the outer module stays
     importable without them (for unit tests of the pure helpers).
+
+    D21 fix (2026-04-15): the policy and reference models are now
+    full ``VerifierModel`` instances loaded via
+    ``inference.verifier_model.load_verifier_checkpoint``.  The old
+    code tried to load the v3 checkpoint into a plain
+    ``AutoModel + Linear(hidden, 2)`` layout via ``strict=False``,
+    which silently dropped every head key (verdict_head.0.weight,
+    score_head.*, contrastive_proj.*, heatmap_encoder.*) and started
+    refinement training from a random-init Linear head.  The fix
+    loads the full architecture and would-have-been-trained model
+    so the refinement actually starts from the v3 weights it
+    purports to fine-tune.  See decisions.md D21 + D25.
     """
     import random
 
     import torch
-    from transformers import AutoModel, AutoTokenizer
+
+    # D21 fix: import the canonical loader.  This module will fail
+    # to import if the Modal image is missing
+    # `add_local_python_source("inference")` (see image build at
+    # top of file), surfacing D20 + D21 issues at container start
+    # rather than after expensive setup.
+    from inference.verifier_model import load_verifier_checkpoint
 
     config = DPOTrainingConfig.from_json(config_json)
 
@@ -605,7 +623,7 @@ def _run_training(config_json: str) -> dict[str, Any]:
         torch.cuda.manual_seed_all(config.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("DPO training on device=%s", device)
+    logger.info("Refinement training on device=%s", device)
 
     pairs = load_preference_pairs(config.preference_data)
     logger.info("Loaded %d preference pairs", len(pairs))
@@ -614,54 +632,53 @@ def _run_training(config_json: str) -> dict[str, Any]:
             f"No preference pairs found in {config.preference_data}"
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(config.hf_backbone)
+    # ---- Policy (trainable) — full VerifierModel via canonical loader ----
+    # load_verifier_checkpoint raises RuntimeError if any non-allowed
+    # key is missing, so a stale or wrong-architecture checkpoint
+    # fails loudly here instead of silently producing garbage gradients.
+    tokenizer, policy_model = load_verifier_checkpoint(
+        checkpoint_path=config.base_checkpoint,
+        hf_backbone=config.hf_backbone,
+        device=device,
+        num_classes=2,
+    )
+    policy_model.train()
 
-    # ---- Policy (trainable) ----
-    policy_encoder = AutoModel.from_pretrained(config.hf_backbone).to(device)
-    policy_head = torch.nn.Linear(
-        policy_encoder.config.hidden_size, 2
-    ).to(device)
-
-    state = torch.load(config.base_checkpoint, map_location="cpu")
-    if isinstance(state, dict) and "encoder" in state:
-        policy_encoder.load_state_dict(state["encoder"], strict=False)
-        if "head" in state:
-            policy_head.load_state_dict(state["head"], strict=False)
-    else:
-        policy_encoder.load_state_dict(state, strict=False)
-    policy_encoder.train()
-    policy_head.train()
-
+    # Freeze the first N text_encoder layers (RoBERTa-style).  The
+    # heatmap_encoder, verdict_head, score_head, and contrastive_proj
+    # all stay trainable.  The heatmap path receives zero input at
+    # training time (we use text-only forward), so its parameters get
+    # zero gradients in practice but staying trainable is harmless.
     frozen = _freeze_first_n_layers(
-        policy_encoder, config.freeze_first_n_layers
+        policy_model.text_encoder, config.freeze_first_n_layers
     )
     logger.info(
-        "Froze %d policy parameters in first %d layers",
+        "Froze %d policy parameters in first %d text_encoder layers",
         frozen, config.freeze_first_n_layers,
     )
 
-    # ---- Reference (frozen) ----
-    ref_encoder = AutoModel.from_pretrained(config.hf_backbone).to(device)
-    ref_head = torch.nn.Linear(
-        ref_encoder.config.hidden_size, 2
-    ).to(device)
-    if isinstance(state, dict) and "encoder" in state:
-        ref_encoder.load_state_dict(state["encoder"], strict=False)
-        if "head" in state:
-            ref_head.load_state_dict(state["head"], strict=False)
-    else:
-        ref_encoder.load_state_dict(state, strict=False)
-    for p in list(ref_encoder.parameters()) + list(ref_head.parameters()):
+    # ---- Reference (frozen) — second VerifierModel for DPO branch ----
+    # In R-Drop / consistency mode the reference model is unused (we
+    # only need the policy and a stop-gradient on its own outputs),
+    # but we still load it so the legacy DPO branch keeps working.
+    # In consistency mode the ref load is wasted ~1.5 GB GPU memory;
+    # we accept that to keep the code simple.
+    _ref_tokenizer, ref_model = load_verifier_checkpoint(
+        checkpoint_path=config.base_checkpoint,
+        hf_backbone=config.hf_backbone,
+        device=device,
+        num_classes=2,
+    )
+    for p in ref_model.parameters():
         p.requires_grad = False
-    ref_encoder.eval()
-    ref_head.eval()
+    ref_model.eval()
 
     # ---- Optimizer ----
-    trainable = [
-        p for p in list(policy_encoder.parameters())
-        + list(policy_head.parameters())
-        if p.requires_grad
-    ]
+    # Only train parameters with requires_grad=True (i.e. text_encoder
+    # layers 8-23 + heatmap_encoder + verdict_head + score_head +
+    # contrastive_proj).  Embeddings and layers 0-7 are frozen by
+    # _freeze_first_n_layers above.
+    trainable = [p for p in policy_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=config.lr)
 
     tracker = DPOEarlyStopTracker(
@@ -673,8 +690,20 @@ def _run_training(config_json: str) -> dict[str, Any]:
         maxlen=config.log_every
     )
 
-    def _forward(encoder: Any, head: Any, batch: list[dict[str, str]]) -> tuple[Any, Any]:
-        """Run encoder+head on (counterfactual, evidence) and (claim, evidence)."""
+    def _forward(model: Any, batch: list[dict[str, str]]) -> tuple[Any, Any]:
+        """Run the full VerifierModel on (counterfactual, evidence) and
+        (claim, evidence) pairs.
+
+        Returns ``(chosen_logits, rejected_logits)`` where each is the
+        2-class verdict_logits tensor of shape (batch, 2).  The
+        sigmoid_score head output is discarded — refinement only
+        touches the verdict head's signal.
+
+        D21 fix: takes a single ``model`` (full VerifierModel) instead
+        of the old (encoder, head) tuple.  The model's forward returns
+        ``(verdict_logits, sigmoid_score)``; we keep verdict_logits
+        and ignore sigmoid_score.
+        """
         chosen_firsts = [b["counterfactual"] for b in batch]
         chosen_seconds = [b["evidence"] for b in batch]
         rejected_firsts = [b["claim"] for b in batch]
@@ -693,13 +722,15 @@ def _run_training(config_json: str) -> dict[str, Any]:
             return_tensors="pt",
         ).to(device)
 
-        chosen_out = encoder(
-            **chosen_enc, return_dict=True
-        ).last_hidden_state[:, 0, :]
-        rejected_out = encoder(
-            **rejected_enc, return_dict=True
-        ).last_hidden_state[:, 0, :]
-        return head(chosen_out), head(rejected_out)
+        chosen_logits, _chosen_score = model(
+            input_ids=chosen_enc["input_ids"],
+            attention_mask=chosen_enc["attention_mask"],
+        )
+        rejected_logits, _rejected_score = model(
+            input_ids=rejected_enc["input_ids"],
+            attention_mask=rejected_enc["attention_mask"],
+        )
+        return chosen_logits, rejected_logits
 
     rng = random.Random(config.seed)
     global_step = 0
@@ -729,7 +760,7 @@ def _run_training(config_json: str) -> dict[str, Any]:
                 # reference model is still loaded for legacy/
                 # comparison but is unused in this branch.
                 policy_orig_logits, policy_cf_logits = _forward(
-                    policy_encoder, policy_head, batch
+                    policy_model, batch
                 )
                 # Note: _forward returns (chosen, rejected) =
                 # (counterfactual, original).  For the consistency
@@ -756,11 +787,11 @@ def _run_training(config_json: str) -> dict[str, Any]:
                 # Legacy DPO path (BROKEN — kept for research
                 # comparison only; see top-of-file docstring).
                 policy_chosen_logits, policy_rejected_logits = _forward(
-                    policy_encoder, policy_head, batch
+                    policy_model, batch
                 )
                 with torch.no_grad():
                     ref_chosen_logits, ref_rejected_logits = _forward(
-                        ref_encoder, ref_head, batch
+                        ref_model, batch
                     )
                 loss, margin, kl_proxy, chosen_reward = _dpo_classifier_loss(
                     policy_chosen_logits,
@@ -855,10 +886,21 @@ def _run_training(config_json: str) -> dict[str, Any]:
                 f"This checkpoint should NOT be used as v4. "
                 f"Ship v3 instead and document the abort in the paper.\n"
             )
+    # D21 fix: write a flat VerifierModel state_dict under the
+    # "model_state_dict" key so downstream eval (modal_run_evaluation,
+    # demo_provenance_gate_failure, run_openi_recalibrated_eval) can
+    # load it via the canonical inference.verifier_model.load_verifier_checkpoint
+    # path without any further translation.  The old format
+    # {"encoder": ..., "head": ...} was load-compatible with the
+    # broken AutoModel + Linear loader pattern, which is exactly what
+    # we removed in D21.  Writing in the new format closes the loop:
+    # if anything tries to load this v4 checkpoint with the broken
+    # pattern, the canonical loader will raise on hard-missing keys.
     torch.save(
         {
-            "encoder": policy_encoder.state_dict(),
-            "head": policy_head.state_dict(),
+            "model_state_dict": policy_model.state_dict(),
+            "epoch": config.num_epochs,
+            "loss": float(history[-1]["loss"]) if history else None,
             "config": asdict(config),
             "stop_reason": stop_reason,
         },
@@ -901,6 +943,14 @@ try:
                 "huggingface_hub<0.25",
             ]
         )
+        # D20 fix (2026-04-15): ship the in-repo `inference/` package
+        # so the trainer can import `inference.verifier_model.load_verifier_checkpoint`
+        # at module load.  Without this, the container crashes at
+        # import with `ModuleNotFoundError: No module named 'inference'`
+        # exactly like the Task 9 gate demo did before its fix.  Same
+        # pattern as scripts/demo_provenance_gate_failure.py +
+        # scripts/modal_build_retrieval_eval.py.
+        .add_local_python_source("inference")
     )
     app = _modal.App(APP_NAME, image=_image)
     volume = _modal.Volume.from_name(VOLUME_NAME, create_if_missing=False)

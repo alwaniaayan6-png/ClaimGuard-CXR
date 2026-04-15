@@ -276,7 +276,6 @@ class CausalTermIdentifier:
         try:
             import torch
             from captum.attr import LayerIntegratedGradients
-            from transformers import AutoModel, AutoTokenizer
         except ImportError as e:  # noqa: BLE001
             raise ImportError(
                 "CausalTermIdentifier requires torch, transformers, and "
@@ -284,10 +283,27 @@ class CausalTermIdentifier:
                 "captum`."
             ) from e
 
+        # D21 fix (2026-04-15): import the canonical VerifierModel
+        # loader from inference.verifier_model so we load the FULL
+        # multimodal architecture (text_encoder + heatmap_encoder +
+        # verdict_head + score_head + contrastive_proj) instead of
+        # the broken plain AutoModel + Linear(hidden, 2) layout that
+        # silently dropped the head weights.  The previous loader
+        # built integrated gradients against a random-init Linear
+        # head, producing meaningless attributions.  See
+        # decisions.md D21 + D25 for the full incident report.
+        try:
+            from inference.verifier_model import load_verifier_checkpoint
+        except ImportError as e:
+            raise ImportError(
+                "CausalTermIdentifier requires inference/verifier_model.py. "
+                "If running in a Modal container, ensure the image was "
+                "built with `.add_local_python_source(\"inference\")` "
+                "(D20 fix)."
+            ) from e
+
         self._torch = torch
         self._lig_cls = LayerIntegratedGradients
-        self._auto_tok = AutoTokenizer
-        self._auto_model = AutoModel
 
         self.model_path = model_path
         self.hf_backbone = hf_backbone
@@ -296,38 +312,41 @@ class CausalTermIdentifier:
         self.n_ig_steps = int(n_ig_steps)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        # ---- Load the backbone + head ----
-        self.tokenizer = self._auto_tok.from_pretrained(hf_backbone)
-        self.model = self._auto_model.from_pretrained(hf_backbone)
-        state = torch.load(model_path, map_location="cpu")
-        # The v3 checkpoint format is `{"encoder": ..., "head": ...}`
-        # — we load both if present, else fall back to loading the
-        # whole dict into the encoder.
-        if isinstance(state, dict) and "encoder" in state:
-            self.model.load_state_dict(state["encoder"], strict=False)
-        else:
-            self.model.load_state_dict(state, strict=False)
-        self.model.to(self.device)
-        self.model.eval()
-
-        # The head is a linear layer projecting pooled CLS → 2 logits.
-        # We reconstruct it if the checkpoint stores it; otherwise we
-        # build a freshly-initialised placeholder which still gives
-        # useful attribution gradients (they depend on relative
-        # magnitudes, not absolute scale).
-        self.head = torch.nn.Linear(self.model.config.hidden_size, 2).to(
-            self.device
+        # ---- Load the FULL VerifierModel (D21 fix) ----
+        # load_verifier_checkpoint raises RuntimeError if any non-
+        # allowed key is missing after load_state_dict, so a wrong
+        # architecture or stale checkpoint format will fail loudly
+        # at construction time, not silently produce garbage
+        # attributions later.
+        self.tokenizer, self.model = load_verifier_checkpoint(
+            checkpoint_path=model_path,
+            hf_backbone=hf_backbone,
+            device=self.device,
+            num_classes=2,
         )
-        if isinstance(state, dict) and "head" in state:
-            self.head.load_state_dict(state["head"], strict=False)
-        self.head.eval()
+        # The model is in .eval() by default from the loader. We
+        # don't switch to .train() because IG only needs grad-on
+        # against inputs, not parameters.
 
         # ---- Set up LIG on the word-embedding layer ----
-        self._embedding_layer = (
-            self.model.embeddings.word_embeddings
-            if hasattr(self.model, "embeddings")
-            else self.model.roberta.embeddings.word_embeddings
-        )
+        # The text encoder is now a wrapped HF model under
+        # self.model.text_encoder. The embedding layer is at
+        # text_encoder.embeddings.word_embeddings (RoBERTa
+        # convention) OR text_encoder.roberta.embeddings.* (rare
+        # alternate). We probe both.
+        text_enc = self.model.text_encoder
+        if hasattr(text_enc, "embeddings"):
+            self._embedding_layer = text_enc.embeddings.word_embeddings
+        elif hasattr(text_enc, "roberta"):
+            self._embedding_layer = (
+                text_enc.roberta.embeddings.word_embeddings
+            )
+        else:
+            raise RuntimeError(
+                "Cannot locate word_embeddings on text_encoder of type "
+                f"{type(text_enc).__name__}. Expected HF RoBERTa-style "
+                "model with .embeddings.word_embeddings."
+            )
         self._lig = self._lig_cls(self._forward_logits, self._embedding_layer)
 
     def _forward_logits(
@@ -335,14 +354,19 @@ class CausalTermIdentifier:
         input_ids: "Any",  # torch.Tensor
         attention_mask: "Any",
     ):
-        """Forward pass returning the 2-class logits for LIG."""
-        out = self.model(
+        """Forward pass returning the 2-class logits for LIG.
+
+        Calls the FULL VerifierModel forward (text_encoder +
+        heatmap_encoder zero-fill path + verdict_head). Returns the
+        verdict_logits tensor of shape (batch, 2). The zero heatmap
+        is automatically supplied by VerifierModel.forward when
+        heatmap=None.
+        """
+        verdict_logits, _sigmoid_score = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            return_dict=True,
         )
-        cls = out.last_hidden_state[:, 0, :]
-        return self.head(cls)
+        return verdict_logits
 
     def identify(
         self,
