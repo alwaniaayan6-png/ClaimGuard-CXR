@@ -71,17 +71,40 @@ class TestDPOTrainingConfig(unittest.TestCase):
         self.assertEqual(c.freeze_first_n_layers, 8)
         self.assertEqual(c.target_label, 1)
 
+    def test_consistency_mode_defaults(self) -> None:
+        """Reviewer-requested fix: the default loss mode is the
+        R-Drop consistency regularizer, NOT legacy DPO. Lock the
+        default + hyperparameter values so a future edit can't
+        silently revert to the broken DPO-only path."""
+        c = DPOTrainingConfig()
+        self.assertEqual(c.loss_mode, "consistency")
+        self.assertEqual(c.ce_weight, 1.0)
+        self.assertEqual(c.consistency_weight, 0.5)
+        self.assertEqual(c.ce_blowup_threshold, 2.5)
+
     def test_json_round_trip(self) -> None:
         c = DPOTrainingConfig(lr=1e-5, beta=0.2)
         s = c.to_json()
         c2 = DPOTrainingConfig.from_json(s)
         self.assertEqual(c, c2)
 
+    def test_json_round_trip_with_loss_mode_override(self) -> None:
+        c = DPOTrainingConfig(
+            loss_mode="dpo",
+            ce_weight=0.8,
+            consistency_weight=1.2,
+        )
+        c2 = DPOTrainingConfig.from_json(c.to_json())
+        self.assertEqual(c, c2)
+        self.assertEqual(c2.loss_mode, "dpo")
+
     def test_json_is_valid_json(self) -> None:
         s = DPOTrainingConfig().to_json()
         parsed = json.loads(s)
         self.assertIn("base_checkpoint", parsed)
         self.assertIn("beta", parsed)
+        self.assertIn("loss_mode", parsed)
+        self.assertIn("consistency_weight", parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +375,193 @@ class TestFormatRewardHistogram(unittest.TestCase):
         after = line.split("]:")[-1].strip()
         counts = [int(x) for x in after.split()]
         self.assertEqual(sum(counts), len(values))
+
+
+# ---------------------------------------------------------------------------
+# _consistency_classifier_loss (torch-gated)
+# ---------------------------------------------------------------------------
+# These tests exercise the R-Drop / UDA style consistency loss added
+# for Task 3 BUG A.  The loss function imports torch lazily, so we
+# skip the whole class if torch isn't available on the current
+# interpreter (CPU-only laptop).  When torch IS available, these
+# tests validate that (a) the loss is non-negative, (b) identical
+# inputs yield zero consistency KL, (c) the loss decreases as the
+# two input distributions converge, and (d) the CE term picks up
+# the true-label supervision.
+
+
+def _torch_available() -> bool:
+    try:
+        import torch  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(
+    _torch_available(),
+    "torch not installed — consistency loss tests require torch",
+)
+class TestConsistencyClassifierLoss(unittest.TestCase):
+    """Reviewer-requested: lock the Task 3 BUG A fix with tests.
+
+    The consistency loss must:
+    (1) return a non-negative scalar
+    (2) produce zero consistency KL when the two logit tensors are
+        identical (the invariance objective is already satisfied)
+    (3) be strictly larger when the two logit tensors disagree,
+        and decrease monotonically as they converge
+    (4) preserve label supervision via the CE term
+    """
+
+    def _make_logits(self, values):
+        import torch
+        return torch.tensor(values, dtype=torch.float32)
+
+    def test_identical_logits_zero_consistency(self) -> None:
+        from scripts.modal_train_dpo_refinement import (
+            _consistency_classifier_loss,
+        )
+        # Both sides equal → consistency KL must be zero.
+        logits = self._make_logits([[-1.0, 1.0], [-0.5, 0.5]])
+        loss, ce_mean, cons_kl, agreement = _consistency_classifier_loss(
+            logits_original=logits,
+            logits_counterfactual=logits.clone(),
+            target_label=1,
+        )
+        self.assertAlmostEqual(cons_kl, 0.0, places=5)
+        self.assertAlmostEqual(agreement, 0.0, places=5)
+        # CE is still positive (depends on how confident the logits are)
+        self.assertGreater(ce_mean, 0.0)
+
+    def test_loss_is_nonnegative(self) -> None:
+        from scripts.modal_train_dpo_refinement import (
+            _consistency_classifier_loss,
+        )
+        logits_a = self._make_logits([[-1.0, 1.0], [2.0, -2.0]])
+        logits_b = self._make_logits([[-0.5, 0.5], [1.0, -1.0]])
+        loss, _, _, _ = _consistency_classifier_loss(
+            logits_original=logits_a,
+            logits_counterfactual=logits_b,
+            target_label=1,
+        )
+        self.assertGreaterEqual(float(loss.item()), 0.0)
+
+    def test_disagreeing_logits_have_positive_consistency(self) -> None:
+        from scripts.modal_train_dpo_refinement import (
+            _consistency_classifier_loss,
+        )
+        # One side strongly contradicted, other side strongly supported.
+        logits_a = self._make_logits([[-5.0, 5.0]])  # P(contra)≈1
+        logits_b = self._make_logits([[5.0, -5.0]])  # P(contra)≈0
+        _, _, cons_kl, _ = _consistency_classifier_loss(
+            logits_original=logits_a,
+            logits_counterfactual=logits_b,
+            target_label=1,
+        )
+        self.assertGreater(cons_kl, 1.0)
+
+    def test_consistency_kl_decreases_as_logits_converge(self) -> None:
+        """The consistency KL must be monotone in the distance
+        between the two output distributions.  Sweep a pair of
+        logits from far-apart to identical and check monotone
+        decrease."""
+        from scripts.modal_train_dpo_refinement import (
+            _consistency_classifier_loss,
+        )
+        kls = []
+        for gap in (4.0, 3.0, 2.0, 1.0, 0.5, 0.0):
+            logits_a = self._make_logits([[-gap, gap]])
+            logits_b = self._make_logits([[gap, -gap]])
+            _, _, cons_kl, _ = _consistency_classifier_loss(
+                logits_original=logits_a,
+                logits_counterfactual=logits_b,
+                target_label=1,
+            )
+            kls.append(cons_kl)
+        # Each successive gap reduction should give a strictly lower
+        # consistency KL.
+        for i in range(len(kls) - 1):
+            self.assertGreaterEqual(
+                kls[i], kls[i + 1],
+                f"consistency KL not monotone: kls[{i}]={kls[i]} "
+                f"< kls[{i+1}]={kls[i+1]}",
+            )
+        self.assertAlmostEqual(kls[-1], 0.0, places=5)
+
+    def test_ce_picks_up_label_supervision(self) -> None:
+        """CE term should be LOW when both sides confidently predict
+        the target label, and HIGH when they confidently predict
+        the wrong label."""
+        from scripts.modal_train_dpo_refinement import (
+            _consistency_classifier_loss,
+        )
+        # Correct direction: both predict contradicted (class 1).
+        correct = self._make_logits([[-5.0, 5.0]])
+        _, ce_correct, _, _ = _consistency_classifier_loss(
+            logits_original=correct,
+            logits_counterfactual=correct.clone(),
+            target_label=1,
+        )
+        # Wrong direction: both predict not-contradicted (class 0).
+        wrong = self._make_logits([[5.0, -5.0]])
+        _, ce_wrong, _, _ = _consistency_classifier_loss(
+            logits_original=wrong,
+            logits_counterfactual=wrong.clone(),
+            target_label=1,
+        )
+        self.assertLess(ce_correct, 0.1)
+        self.assertGreater(ce_wrong, 5.0)
+
+    def test_agreement_signal_is_signed(self) -> None:
+        """The agreement return (`P(y|cf) - P(y|orig)`) should be
+        positive when the counterfactual has a higher contradicted
+        probability and negative when the original does."""
+        from scripts.modal_train_dpo_refinement import (
+            _consistency_classifier_loss,
+        )
+        orig_low = self._make_logits([[2.0, -2.0]])   # P(contra)≈0.02
+        cf_high = self._make_logits([[-2.0, 2.0]])    # P(contra)≈0.98
+        _, _, _, agreement = _consistency_classifier_loss(
+            logits_original=orig_low,
+            logits_counterfactual=cf_high,
+            target_label=1,
+        )
+        self.assertGreater(agreement, 0.5)
+        # Flip: original high, cf low
+        _, _, _, agreement2 = _consistency_classifier_loss(
+            logits_original=cf_high,
+            logits_counterfactual=orig_low,
+            target_label=1,
+        )
+        self.assertLess(agreement2, -0.5)
+
+    def test_custom_weights_affect_total_loss(self) -> None:
+        """The ce_weight and consistency_weight parameters should
+        both change the total loss value linearly."""
+        from scripts.modal_train_dpo_refinement import (
+            _consistency_classifier_loss,
+        )
+        logits_a = self._make_logits([[-1.0, 1.0]])
+        logits_b = self._make_logits([[1.0, -1.0]])
+        loss_default, _, _, _ = _consistency_classifier_loss(
+            logits_original=logits_a,
+            logits_counterfactual=logits_b,
+            target_label=1,
+            ce_weight=1.0,
+            consistency_weight=0.5,
+        )
+        loss_double_cons, _, _, _ = _consistency_classifier_loss(
+            logits_original=logits_a,
+            logits_counterfactual=logits_b,
+            target_label=1,
+            ce_weight=1.0,
+            consistency_weight=1.0,
+        )
+        self.assertGreater(
+            float(loss_double_cons.item()),
+            float(loss_default.item()),
+        )
 
 
 if __name__ == "__main__":

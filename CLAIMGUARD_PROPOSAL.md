@@ -518,23 +518,66 @@ re-ran the hypothesis-only baseline to check whether the HO gap
 persists under the broader taxonomy (surfaced explicitly in the
 paper regardless of result).
 
-### V3.2 Counterfactual augmentation + DPO (Task 3)
+### V3.2 Counterfactual consistency regularization (Task 3)
 
-Implements the ACL 2025 "Dually Self-Improved" recipe:
-1. **Causal term identification** via last-layer attention × Integrated
+**Citation correction (2026-04-14).** An earlier draft of this
+section cited an "ACL 2025 Dually Self-Improved" paper as the
+source of this approach.  A focused literature review failed to
+find that paper under any variant of the title in arXiv, OpenAlex,
+the ACL Anthology, or Semantic Scholar — the citation appears to
+be an error in the original sprint plan.  The actual methodology
+is drawn from three well-cited sources:
+
+* **R-Drop** (Liang et al., NeurIPS 2021, arXiv:2106.14448) —
+  symmetric-KL regularization for supervised fine-tuning
+* **UDA** (Xie et al., NeurIPS 2020, arXiv:1904.12848) —
+  consistency training with stop-grad targets
+* **Kaushik et al.** (ICLR 2020, arXiv:1909.12434) — "Learning the
+  Difference that Makes a Difference with Counterfactually-
+  Augmented Data" (the CAD recipe)
+
+**Approach.** Three stages:
+
+1. **Causal term identification** via embedding-layer × Integrated
    Gradients (captum) on the v3 checkpoint — returns ranked causal
    spans per contradicted claim.
 2. **Counterfactual generation** via Claude Sonnet 4.5, prompted to
    produce minimally-edited paraphrases that preserve the causal
    tokens verbatim and rephrase the non-causal surface form.
-3. **DPO refinement** via `trl.DPOTrainer` (β=0.1, lr=5e-6, 1 epoch,
-   gradient clip 1.0, freeze first 8 RoBERTa layers, early-stop on
-   KL > 5 or mean reward margin < 0 for 50 consecutive steps).
+   Preservation is validated via case-insensitive word-boundary
+   regex (not substring — a reviewer-flagged bug in the v3 sprint).
+3. **Consistency refinement** (not DPO).  For each preference pair
+   `(original, counterfactual)` both carrying the same ground-truth
+   label (contradicted), the v4 trainer minimizes
 
-Produces a v4 DPO checkpoint at
-`/data/checkpoints/verifier_binary_v4_dpo/`. Success criterion: the
-HO-baseline gap grows from 0.60 pp to **≥ 5 pp** on v4, meaning the
-model now uses evidence rather than surface form.
+        L = λ_ce · (CE(orig, y) + CE(cf, y))
+          + λ_cons · (1/2) · [KL(p(·|orig) ‖ stop_grad p(·|cf))
+                              + KL(p(·|cf) ‖ stop_grad p(·|orig))]
+
+   with `λ_ce = 1.0`, `λ_cons = 0.5`, `lr = 5e-6`, 1 epoch, first
+   8 RoBERTa layers frozen, gradient clip 1.0.  The consistency
+   term pulls the two outputs toward each other without biasing
+   either's absolute direction — which is exactly the invariance
+   we want for causal-token robustness.  A legacy DPO loss mode
+   (`--loss-mode dpo`) remains available for research comparison
+   but is not the default and is not used for the paper's v4
+   number.
+
+Rationale for rejecting DPO: a pre-flight review of the original
+DPO-based implementation flagged that the naive formulation with
+`chosen=counterfactual, rejected=original` will pull the original
+claim's contradicted score DOWN to expand the DPO margin, which is
+the opposite of what the plan wants.  Since both sides carry the
+same true label, the correct objective is invariance (R-Drop), not
+preference (DPO).  This is documented in the
+`scripts/modal_train_dpo_refinement.py` top-of-file docstring.
+
+Produces a v4 consistency checkpoint at
+`/data/checkpoints/verifier_binary_v4_dpo/` (path retained for
+compatibility with downstream scripts; the filename's "dpo" suffix
+is now a historical artifact).  Success criterion: the HO-baseline
+gap grows from 0.60 pp to **≥ 5 pp** on v4, meaning the model now
+uses evidence rather than surface form.
 
 ### V3.3 Silver-standard real-hallucination evaluation (Task 1)
 

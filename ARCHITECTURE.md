@@ -843,36 +843,84 @@ to emit `SUPPORTED_TRUSTED` in that case and downgrades to
 | red | any | `CONTRADICTED` | False |
 | any | `PROVENANCE_BLOCKED` | `PROVENANCE_BLOCKED` | False |
 
-### 13.2 Counterfactual augmentation + DPO refinement (Task 3)
+### 13.2 Counterfactual consistency regularization (Task 3)
 
 **Purpose.** Attack the 0.60 pp HO-baseline gap by forcing the verifier
-to learn from **causal** evidence reasoning rather than lexical
-shortcuts. Implements the ACL 2025 "Dually Self-Improved" recipe:
-(a) extract per-claim causal token spans via attention ×
-Integrated-Gradients on the v3 verifier; (b) prompt Claude Sonnet 4.5
-for minimally-edited counterfactual paraphrases that pin the causal
-tokens verbatim and rephrase everything else; (c) train a v4
-checkpoint via DPO (β=0.1, lr=5e-6, 1 epoch, KL early-stop,
-freeze first 8 RoBERTa layers).
+to produce the SAME output on an original claim and its semantics-
+preserving counterfactual paraphrase. Any score difference is
+attributable to surface-form lexical shortcuts; invariance training
+eliminates that signal.
+
+**Methodology (R-Drop / UDA consistency, NOT DPO).** An earlier
+draft used DPO with `chosen=counterfactual, rejected=original`,
+which a pre-flight reviewer flagged as broken: with both sides
+sharing the same true label, DPO's margin-maximization pulls the
+ORIGINAL claim's contradicted score DOWN to expand the margin, the
+opposite of the intended invariance. The corrected approach is the
+literature-standard symmetric-KL consistency regularizer from
+R-Drop (Liang et al., NeurIPS 2021, arXiv:2106.14448) and UDA
+(Xie et al., NeurIPS 2020, arXiv:1904.12848):
+
+    L = λ_ce · (CE(orig, y) + CE(cf, y))
+      + λ_cons · (1/2) · [KL(p(·|orig) ‖ stop_grad p(·|cf))
+                          + KL(p(·|cf) ‖ stop_grad p(·|orig))]
+
+with `λ_ce = 1.0`, `λ_cons = 0.5`. Both sides carry the same label
+`y` (contradicted), so the CE terms preserve label supervision
+while the consistency term pulls the two outputs toward each other
+without biasing either's absolute direction.
+
+Pipeline:
+1. Extract per-claim causal token spans via
+   `LayerIntegratedGradients` on the embedding layer of v3
+   (reviewer-corrected — a prior version attributed at the
+   attention layer, which gave attention-value attributions
+   instead of token-level attributions).
+2. Prompt Claude Sonnet 4.5 for minimally-edited paraphrases that
+   preserve the causal tokens verbatim. Validate via
+   case-insensitive **word-boundary** regex (`\bto\b`) — substring
+   matching was a reviewer-flagged bug: "no" would match "normal"
+   / "nodule" and trivially-wrong variants would pass validation.
+3. Train v4 on (original, counterfactual) pairs using the
+   consistency loss above. Default `loss_mode="consistency"` in
+   `DPOTrainingConfig`; the legacy `loss_mode="dpo"` path is
+   preserved for research comparison but is not used for the
+   paper's v4 number.
+
+**Citation correction.** The sprint plan cited an "ACL 2025 Dually
+Self-Improved" paper which a literature review failed to find in
+arXiv / OpenAlex / ACL Anthology / Semantic Scholar. The real
+sources are R-Drop, UDA, and Kaushik et al. ICLR 2020
+(arXiv:1909.12434) — all peer-reviewed, well-cited, and directly
+applicable.
 
 **Files.**
 - `data/augmentation/causal_term_identifier.py` (32/32 tests): loads v3,
-  runs `captum.attr.LayerIntegratedGradients` on the last-layer attention
-  over the CLS token, returns ranked `CausalSpan` objects.
-- `data/augmentation/counterfactual_generator.py` (54/54 tests):
-  `CounterfactualGenerator` drives Claude Sonnet 4.5 through an injected
-  transport (default = Anthropic SDK, test stub = callable), parses
-  JSON variants tolerantly, validates causal-token preservation via
-  case-insensitive substring, ranks by Levenshtein distance.
-- `scripts/modal_train_dpo_refinement.py` (29/29 tests, H100 training
-  entry point): `DPOTrainingConfig`, `load_preference_pairs`,
-  `DPOEarlyStopTracker`, `format_reward_histogram`. Uses
-  `trl.DPOTrainer` pinned to `trl==0.9.x`. Runs on the
-  `claimguard-dpo-refinement` app, volume `claimguard-data`.
+  runs `captum.attr.LayerIntegratedGradients` on the embedding-layer
+  attribution path (reviewer-corrected from the old attention-layer
+  target), returns ranked `CausalSpan` objects. Also contains a
+  reviewer-flagged SEP-index fix: RoBERTa's `<s> claim </s></s>
+  evidence </s>` structure means the first evidence subword is 2
+  positions after the first `</s>`, not 1.
+- `data/augmentation/counterfactual_generator.py` (60/60 tests —
+  up from 54 after reviewer fix): `CounterfactualGenerator` drives
+  Claude Sonnet 4.5 through an injected transport, parses JSON
+  tolerantly, validates causal-token preservation via
+  **case-insensitive word-boundary regex** (\btoken\b), ranks by
+  Levenshtein distance. 6 new regression tests lock the
+  word-boundary fix.
+- `scripts/modal_train_dpo_refinement.py` (38/38 tests — 7 torch-
+  gated for the new consistency loss): `DPOTrainingConfig` with
+  `loss_mode`, `ce_weight`, `consistency_weight` fields;
+  `_consistency_classifier_loss` as the default training path;
+  `_dpo_classifier_loss` kept for legacy comparison. Does NOT use
+  `trl.DPOTrainer` — the custom loss is simpler and avoids TRL's
+  causal-LM assumption.
 
-**Success criterion.** The HO-baseline gap grows from 0.60 pp (v1) to
-≥ 5 pp (v4 DPO) — meaning the v4 verifier now uses evidence rather
-than surface form. See §13.5 for the pass/fail metric.
+**Success criterion.** The HO-baseline gap grows from 0.60 pp (v1)
+to ≥ 5 pp (v4 consistency) — meaning the v4 verifier now uses
+evidence rather than surface form. Abort conditions: mean CE
+exceeds 2.5 (catastrophic label collapse) at any step.
 
 ### 13.3 Silver-standard real-hallucination evaluation (Task 1)
 

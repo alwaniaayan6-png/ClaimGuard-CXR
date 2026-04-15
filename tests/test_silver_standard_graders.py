@@ -25,7 +25,11 @@ if _REPO_ROOT not in sys.path:
 from scripts.generate_silver_standard_graders import (  # noqa: E402
     CHEXBERT_PATHOLOGIES,
     LABEL_TO_ORDINAL,
+    NEGATION_CUES,
+    PATHOLOGY_KEYWORDS,
+    UNCERTAINTY_CUES,
     VALID_LABELS,
+    _rule_based_chexpert_label_vector,
     claim_to_pathology,
     label_from_chexbert_diff,
     parse_grader_json,
@@ -236,6 +240,144 @@ class TestSchemaInvariants(unittest.TestCase):
 
     def test_uncertain_is_four(self) -> None:
         self.assertEqual(LABEL_TO_ORDINAL["UNCERTAIN"], 4)
+
+
+# ---------------------------------------------------------------------------
+# Rule-based CheXpert labeler (2026-04-14 reviewer fix — replaces the
+# broken HF CheXbert path that stamped every row UNCERTAIN because
+# the 14-head classifier wasn't on HF).
+# ---------------------------------------------------------------------------
+
+
+class TestRuleBasedChexpertLabeler(unittest.TestCase):
+    """Lock the rule-based labeler behaviour.
+
+    The labeler replaces the broken HF CheXbert load that the pre-
+    flight reviewer flagged as a silent ghost grader.  Every row in
+    Task 1 passes through this labeler on both the claim text and
+    the GT report, producing 14-dim label vectors that feed into
+    ``label_from_chexbert_diff``.  These tests pin the main
+    behaviours:
+
+        (1) Empty input → all zeros
+        (2) Positive mentions → label 1
+        (3) Negated mentions → label 2
+        (4) Uncertainty cues → label 3
+        (5) Multi-pathology reports → correct per-class assignment
+        (6) "No Finding" inference — positive only when no other
+            pathology is positive AND the text contains a
+            no-finding phrase
+        (7) Word-order variants (e.g., "heart is enlarged" vs
+            "enlarged heart") both hit Cardiomegaly
+    """
+
+    def _vec(self, text: str) -> dict[str, int]:
+        """Return a {pathology: label} dict, dropping zeros."""
+        labels = _rule_based_chexpert_label_vector(text)
+        return {
+            p: l for p, l in zip(CHEXBERT_PATHOLOGIES, labels) if l != 0
+        }
+
+    def test_empty_input_all_zeros(self) -> None:
+        vec = _rule_based_chexpert_label_vector("")
+        self.assertEqual(vec, [0] * 14)
+
+    def test_whitespace_input_all_zeros(self) -> None:
+        vec = _rule_based_chexpert_label_vector("   \n\t  ")
+        self.assertEqual(vec, [0] * 14)
+
+    def test_positive_pneumothorax(self) -> None:
+        d = self._vec("Large right-sided pneumothorax.")
+        self.assertEqual(d.get("Pneumothorax"), 1)
+
+    def test_negated_pneumothorax(self) -> None:
+        d = self._vec("No pneumothorax seen.")
+        self.assertEqual(d.get("Pneumothorax"), 2)
+
+    def test_negation_without_cue(self) -> None:
+        d = self._vec("Lungs without pneumothorax.")
+        self.assertEqual(d.get("Pneumothorax"), 2)
+
+    def test_uncertain_pneumonia(self) -> None:
+        d = self._vec("Possible left lower lobe pneumonia.")
+        self.assertEqual(d.get("Pneumonia"), 3)
+
+    def test_uncertain_may_represent(self) -> None:
+        d = self._vec("Opacity in the left base may represent atelectasis.")
+        self.assertEqual(d.get("Atelectasis"), 3)
+
+    def test_positive_cardiomegaly_word_order_variants(self) -> None:
+        """Regression: 'heart is enlarged' must hit Cardiomegaly even
+        though the literal keyword 'enlarged heart' has the opposite
+        word order. Fixed in the 2026-04-14 reviewer pass."""
+        for claim in (
+            "The heart is enlarged.",
+            "Cardiomegaly is present.",
+            "Enlarged cardiac silhouette noted.",
+            "Cardiac enlargement is seen.",
+        ):
+            d = self._vec(claim)
+            self.assertEqual(
+                d.get("Cardiomegaly"), 1,
+                f"expected Cardiomegaly=1 in {claim!r}, got {d}",
+            )
+
+    def test_no_finding_inference_positive_when_clear_lungs(self) -> None:
+        d = self._vec("Clear lungs. No acute cardiopulmonary process.")
+        self.assertEqual(d.get("No Finding"), 1)
+
+    def test_no_finding_inference_suppressed_by_positive_pathology(self) -> None:
+        """'No Finding' must be 0 if ANY other pathology is positive,
+        even when a no-finding phrase is present."""
+        d = self._vec("The lungs are clear but cardiomegaly is present.")
+        self.assertEqual(d.get("Cardiomegaly"), 1)
+        # "No Finding" should NOT be 1 because cardiomegaly is positive.
+        self.assertNotEqual(d.get("No Finding"), 1)
+
+    def test_multi_pathology_report(self) -> None:
+        text = (
+            "Cardiomegaly is present with mild pulmonary edema. "
+            "No pleural effusion. Possible left lower lobe atelectasis."
+        )
+        d = self._vec(text)
+        self.assertEqual(d.get("Cardiomegaly"), 1)
+        self.assertEqual(d.get("Edema"), 1)
+        self.assertEqual(d.get("Pleural Effusion"), 2)
+        self.assertEqual(d.get("Atelectasis"), 3)
+
+    def test_negation_far_from_keyword_not_applied(self) -> None:
+        """The negation window is ~30 chars before the keyword. A
+        negation cue far earlier in the sentence must NOT negate a
+        later-mentioned pathology."""
+        text = (
+            "There is no cardiomegaly, but a large pneumothorax is "
+            "seen on the right with significant mediastinal shift."
+        )
+        d = self._vec(text)
+        # "no cardiomegaly" → Cardiomegaly=2 (negated)
+        self.assertEqual(d.get("Cardiomegaly"), 2)
+        # "large pneumothorax" (30+ chars after "no") → Pneumothorax=1 (positive)
+        self.assertEqual(d.get("Pneumothorax"), 1)
+
+    def test_returns_list_of_14_integers(self) -> None:
+        vec = _rule_based_chexpert_label_vector("some claim text")
+        self.assertEqual(len(vec), 14)
+        for v in vec:
+            self.assertIsInstance(v, int)
+            self.assertIn(v, {0, 1, 2, 3})
+
+    def test_all_14_pathologies_have_keywords(self) -> None:
+        """Every CheXbert pathology class should have at least one
+        keyword in the lookup table."""
+        for pathology in CHEXBERT_PATHOLOGIES:
+            self.assertIn(pathology, PATHOLOGY_KEYWORDS)
+            self.assertGreater(len(PATHOLOGY_KEYWORDS[pathology]), 0)
+
+    def test_negation_cues_nonempty(self) -> None:
+        self.assertGreater(len(NEGATION_CUES), 5)
+
+    def test_uncertainty_cues_nonempty(self) -> None:
+        self.assertGreater(len(UNCERTAINTY_CUES), 5)
 
 
 if __name__ == "__main__":

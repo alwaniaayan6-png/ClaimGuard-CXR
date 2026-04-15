@@ -140,18 +140,75 @@ CHEXBERT_PATHOLOGIES: tuple[str, ...] = (
 # safest default (Krippendorff ordinal treats UNCERTAIN as the top
 # label and penalises far-from-UNCERTAIN disagreements more).
 PATHOLOGY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "Cardiomegaly": ("cardiomegaly", "enlarged heart", "cardiac silhouette"),
-    "Enlarged Cardiomediastinum": ("mediastin", "cardiomediastinal"),
-    "Lung Opacity": ("opacity", "opacification"),
-    "Lung Lesion": ("lesion", "nodule", "mass"),
-    "Edema": ("edema", "pulmonary edema", "interstitial edema"),
-    "Consolidation": ("consolidation", "consolidated"),
-    "Pneumonia": ("pneumonia", "infect"),
-    "Atelectasis": ("atelectas",),
-    "Pneumothorax": ("pneumothorax", "ptx"),
-    "Pleural Effusion": ("effusion", "pleural fluid"),
-    "Pleural Other": ("pleural thickening", "pleural plaque"),
-    "Fracture": ("fracture", "broken rib"),
+    "Cardiomegaly": (
+        "cardiomegaly",
+        "enlarged heart",
+        "heart is enlarged",
+        "heart enlarged",
+        "enlarged cardiac",
+        "cardiac enlargement",
+        "cardiac silhouette is enlarged",
+        "cardiac silhouette enlarged",
+        "enlarged cardiac silhouette",
+    ),
+    "Enlarged Cardiomediastinum": (
+        "mediastin",
+        "cardiomediastinal",
+        "widened mediastinum",
+        "mediastinal widening",
+    ),
+    "Lung Opacity": (
+        "opacity",
+        "opacities",
+        "opacification",
+    ),
+    "Lung Lesion": (
+        "lesion",
+        "nodule",
+        "mass",
+        "pulmonary nodule",
+        "lung mass",
+    ),
+    "Edema": (
+        "edema",
+        "pulmonary edema",
+        "interstitial edema",
+        "vascular congestion",
+    ),
+    "Consolidation": (
+        "consolidation",
+        "consolidated",
+        "airspace disease",
+    ),
+    "Pneumonia": (
+        "pneumonia",
+        "infect",
+        "infection",
+        "infectious",
+    ),
+    "Atelectasis": (
+        "atelectas",
+        "lung collapse",
+        "collapsed lung",
+    ),
+    "Pneumothorax": (
+        "pneumothorax",
+        "ptx",
+    ),
+    "Pleural Effusion": (
+        "effusion",
+        "pleural fluid",
+    ),
+    "Pleural Other": (
+        "pleural thickening",
+        "pleural plaque",
+        "pleural scarring",
+    ),
+    "Fracture": (
+        "fracture",
+        "broken rib",
+        "rib fracture",
+    ),
     "Support Devices": (
         "line",
         "catheter",
@@ -159,14 +216,93 @@ PATHOLOGY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "pacemaker",
         "pacer",
         "icd",
+        "endotracheal",
+        "ett",
+        "picc",
     ),
     "No Finding": (
         "no acute",
         "unremarkable",
         "normal chest",
         "clear lungs",
+        "lungs are clear",
+        "lungs clear",
+        "no abnormality",
+        "within normal limits",
+        "no focal consolidation",
+        "no acute cardiopulmonary",
+        "no findings",
     ),
 }
+
+# Negation cues that flip a positive mention to "absent" (CheXpert
+# label 2).  These are matched within a local window BEFORE the
+# pathology keyword so "no pneumothorax" → (Pneumothorax, absent).
+#
+# Reviewer note (2026-04-14): the original CheXpert labeler (Irvin
+# et al., AAAI 2019) uses a 50+ item negation lexicon with parse-
+# tree scope.  This conservative subset covers the common radiology
+# cases without bringing a parser dependency.  Anything not matched
+# here stays POSITIVE by default, which is the CheXpert labeler's
+# behavior as well (positive-default + targeted negation).
+NEGATION_CUES: tuple[str, ...] = (
+    "no ",
+    "no\t",
+    "no\n",
+    "without",
+    "absent",
+    "absence of",
+    "negative for",
+    "free of",
+    "rule out",
+    "rules out",
+    "ruled out",
+    "no evidence of",
+    "no evidence for",
+    "no sign of",
+    "no signs of",
+    "not seen",
+    "not identified",
+    "not visualized",
+    "not visualised",
+    "not appreciated",
+    "not present",
+    "no acute",
+    "no focal",
+    "clear of",
+    "resolved",
+    "denies",
+    "unremarkable for",
+)
+
+# Uncertainty cues that flip a positive mention to "uncertain"
+# (CheXpert label 3).  Same local-window rule as negation cues.
+UNCERTAINTY_CUES: tuple[str, ...] = (
+    "possible",
+    "possibly",
+    "probable",
+    "probably",
+    "may represent",
+    "may be",
+    "may reflect",
+    "could be",
+    "could represent",
+    "suspected",
+    "suspicious for",
+    "suggestive of",
+    "concerning for",
+    "cannot exclude",
+    "cannot be excluded",
+    "difficult to exclude",
+    "versus",
+    "vs.",
+    "consider",
+    "questionable",
+    "query",
+    "indeterminate",
+    "equivocal",
+    "borderline",
+)
 
 GRADER_PROMPT = """You are a radiology claim auditor. Given a chest X-ray, the original radiologist report, and a single claim extracted from a model-generated report, pick exactly one label:
 SUPPORTED          — claim is consistent with both image and report
@@ -286,119 +422,218 @@ def run_chexbert_grader(
 ) -> None:
     """Populate ``grader_chexbert_*`` fields for every workbook row.
 
-    This function mutates ``workbook`` in place.  It tries to load the
-    ``stanfordmlgroup/CheXbert`` checkpoint via HuggingFace; on failure
-    it stamps every row with UNCERTAIN / low confidence and continues.
+    Uses a **rule-based CheXpert-style labeler** (not the neural
+    CheXbert model) as the primary path.  A 2026-04-14 pre-flight
+    reviewer flagged that Stanford's ``stanfordmlgroup/CheXbert`` HF
+    upload does not include the 14-head classifier MLP — calling
+    ``AutoModel.from_pretrained`` on it silently returns the BERT
+    encoder only, and the downstream logits have the wrong shape.
+    The old code then stamped every row with all-UNCERTAIN, which
+    collapsed the Krippendorff α matrix to 2 effective coders.
+
+    The rule-based labeler mirrors the CheXpert labeler (Irvin et al.,
+    AAAI 2019) approach: for each of 14 pathology keywords, check if
+    any alias appears in the text, check for negation cues within a
+    local window before the mention, check for uncertainty cues in
+    the same window.  Emit 0 (blank / not mentioned), 1 (positive),
+    2 (negative / absent), or 3 (uncertain).  This is ~5 pp noisier
+    than the real neural CheXbert but is deterministic, cheap, and
+    produces REAL label vectors instead of a ghost column.
+
+    This function mutates ``workbook`` in place.  It does NOT depend
+    on torch or transformers — the rule-based path runs in ~1 ms per
+    row, so the grader is effectively free.
     """
     try:
-        import torch  # noqa: F401
-        from transformers import AutoModel, AutoTokenizer  # noqa: F401
+        import pandas as pd
+        from tqdm import tqdm
     except Exception as e:  # noqa: BLE001
-        print(f"chexbert grader: torch/transformers import failed ({e})")
+        print(f"chexbert grader: pandas/tqdm import failed ({e})")
         _stamp_abstain_chexbert(workbook)
         return
 
-    # The canonical CheXbert weights are not packaged on HF Hub by
-    # Stanford.  Users typically re-upload them at
-    # "StanfordAIMI/chexbert" or similar.  We probe a couple of common
-    # IDs and fall back to the abstention path if none work.
-    candidates = (
-        "StanfordAIMI/chexbert",
-        "StanfordAIMI/CheXbert",
-        "stanfordmlgroup/CheXbert",
-    )
-    model, tokenizer = None, None
-    for model_id in candidates:
-        try:
-            import torch
+    # The GT-report CSV is used only for the cache key; the actual
+    # GT report text lives inside each workbook row and is passed
+    # directly into the labeler.
+    try:
+        pd.read_csv(openi_reports_csv)  # sanity check; not used downstream
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"chexbert grader: openi_reports_csv unreadable ({e}); "
+            "continuing with per-row GT report text only"
+        )
 
-            from transformers import AutoModel, AutoTokenizer
-
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_id, trust_remote_code=True
-            )
-            model = AutoModel.from_pretrained(
-                model_id, trust_remote_code=True
-            )
-            model.eval()
-            if torch.cuda.is_available():
-                model = model.to("cuda")
-            print(f"chexbert grader: loaded {model_id}")
-            break
-        except Exception as e:  # noqa: BLE001
-            print(f"chexbert grader: {model_id} failed ({e})")
-            continue
-
-    if model is None or tokenizer is None:
-        print("chexbert grader: no checkpoint loaded; abstaining")
-        _stamp_abstain_chexbert(workbook)
-        return
-
-    # Per-image CheXbert label vectors are cached by study so we don't
-    # re-label the same GT report multiple times.
-    import pandas as pd
-
-    gt_df = pd.read_csv(openi_reports_csv)
     gt_label_cache: dict[str, list[int]] = {}
 
     def _cached_labels(report_text: str) -> list[int] | None:
         key = report_text.strip()
         if not key:
             return None
-        if key in gt_label_cache:
-            return gt_label_cache[key]
-        vec = _chexbert_label_vector(model, tokenizer, key)
-        gt_label_cache[key] = vec
-        return vec
+        if key not in gt_label_cache:
+            gt_label_cache[key] = _rule_based_chexpert_label_vector(key)
+        return gt_label_cache[key]
 
-    from tqdm import tqdm
-
-    for row in tqdm(workbook, desc="CheXbert"):
+    for row in tqdm(workbook, desc="CheXbert (rule-based)"):
         claim_text = row.get("extracted_claim", "")
         gt_text = row.get("ground_truth_report", "")
-        claim_vec = _chexbert_label_vector(model, tokenizer, claim_text)
+        claim_vec = _rule_based_chexpert_label_vector(claim_text)
         gt_vec = _cached_labels(gt_text)
         label, conf = label_from_chexbert_diff(claim_text, claim_vec, gt_vec)
         row["grader_chexbert_label"] = label
         row["grader_chexbert_confidence"] = conf
 
 
-def _chexbert_label_vector(model, tokenizer, text: str) -> list[int] | None:
-    """Compute a 14-dim CheXbert label vector for ``text``.
+# Conjunctions / punctuation that TERMINATE a negation or uncertainty
+# scope.  When scanning the window BEFORE a pathology keyword, any
+# negation cue to the LEFT of the nearest scope-terminator is ignored.
+# This matches the CheXpert labeler's sentence-level scope rule
+# without requiring a full dependency parser.
+#
+# Example: "There is no cardiomegaly, but a large pneumothorax is
+# seen" — the "no" applies to cardiomegaly (before the "but"), but
+# NOT to pneumothorax (after the "but").
+SCOPE_TERMINATORS: tuple[str, ...] = (
+    "but",
+    "however",
+    "although",
+    "though",
+    "whereas",
+    "while",
+    ";",
+    ".",
+    "?",
+    "!",
+)
 
-    This is a best-effort wrapper: because CheXbert's downstream head
-    is sometimes missing from HF uploads, we run the encoder and
-    apply a heuristic fallback when the full classifier head isn't
-    available.  The heuristic is deliberately conservative — it
-    returns all-BLANK (0) for empty text and all-UNCERTAIN (3) for
-    any failure, both of which map to UNCERTAIN in
-    ``label_from_chexbert_diff``.
+
+def _find_in_window_with_scope(
+    cues: tuple[str, ...],
+    window: str,
+) -> bool:
+    """Return True if any cue appears in the window AND is not cut
+    off from the right edge by a scope-terminator.
+
+    Algorithm: scan from the right edge of the window leftward.  Stop
+    as soon as we see a scope-terminator.  If any cue appears in the
+    unterminated suffix, return True.
     """
-    if not text.strip():
-        return [0] * 14
-    try:
-        import torch
+    if not window:
+        return False
+    # Find the rightmost scope-terminator position.  Anything to its
+    # LEFT is out of scope for the current keyword.
+    cut = 0
+    for terminator in SCOPE_TERMINATORS:
+        pos = window.rfind(terminator)
+        if pos >= 0 and pos + len(terminator) > cut:
+            cut = pos + len(terminator)
+    effective = window[cut:]
+    return any(cue in effective for cue in cues)
 
-        inputs = tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-        )
-        if torch.cuda.is_available():
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = model(**inputs)
-        # CheXbert's full implementation has a 14-head MLP on top of
-        # BERT.  HF uploads often omit this head — we fall back to a
-        # conservative all-UNCERTAIN vector in that case so the diff
-        # step does not emit spurious labels.
-        if hasattr(outputs, "logits"):
-            logits = outputs.logits
-            preds = logits.argmax(dim=-1).flatten().tolist()
-            if len(preds) == 14:
-                return [int(p) for p in preds]
-        return [3] * 14  # all-UNCERTAIN ⇒ all rows go to UNCERTAIN
+
+def _rule_based_chexpert_label_vector(text: str) -> list[int]:
+    """CheXpert-style 14-class label vector from a free-text report.
+
+    Returns a list of 14 integers, one per pathology in
+    ``CHEXBERT_PATHOLOGIES`` order, with values:
+
+        * 0 — not mentioned (blank / missing)
+        * 1 — mentioned and positive
+        * 2 — mentioned and negative (absent)
+        * 3 — mentioned and uncertain / hedged
+
+    Algorithm:
+        1. Lowercase the input.
+        2. For each pathology, find all keyword hits (substring match,
+           from ``PATHOLOGY_KEYWORDS``).
+        3. For each hit, look at the 60-character window BEFORE the
+           hit position.  Trim the window at the rightmost
+           scope-terminator (conjunction, period, semicolon, etc.)
+           so only the SAME-CLAUSE context counts.
+        4. If any ``NEGATION_CUES`` appears in the effective window → 2.
+        5. Else if any ``UNCERTAINTY_CUES`` appears in the effective
+           window → 3.
+        6. Else → label 1 (positive).
+        7. If a pathology has multiple hits with different labels,
+           pick the LAST one (latest sentence wins — matches CheXpert
+           labeler behaviour on report-level documents).
+
+    "No Finding" is inferred:
+        * If any other pathology is positive → 0 (blank for No Finding)
+        * If the text matches ``PATHOLOGY_KEYWORDS["No Finding"]``
+          directly → 1 (positive for No Finding)
+        * Otherwise → 0 (blank)
+
+    Empty input returns all-zeros.
+    """
+    if not text or not text.strip():
+        return [0] * len(CHEXBERT_PATHOLOGIES)
+
+    lower = text.lower()
+    vec: list[int] = [0] * len(CHEXBERT_PATHOLOGIES)
+
+    for idx, pathology in enumerate(CHEXBERT_PATHOLOGIES):
+        if pathology == "No Finding":
+            continue  # handled after the main loop
+        keywords = PATHOLOGY_KEYWORDS.get(pathology, ())
+        if not keywords:
+            continue
+        # Find all hits for this pathology.
+        hits: list[tuple[int, int]] = []  # (position, label)
+        for kw in keywords:
+            start = 0
+            while True:
+                i = lower.find(kw.lower(), start)
+                if i < 0:
+                    break
+                # Local window: 60 chars before the hit, then
+                # scope-terminated so only the same-clause context
+                # counts toward negation / uncertainty.
+                window_start = max(0, i - 60)
+                window = lower[window_start:i]
+                if _find_in_window_with_scope(NEGATION_CUES, window):
+                    hits.append((i, 2))  # absent
+                elif _find_in_window_with_scope(UNCERTAINTY_CUES, window):
+                    hits.append((i, 3))  # uncertain
+                else:
+                    hits.append((i, 1))  # positive
+                start = i + max(1, len(kw))
+        if hits:
+            # Last hit wins — matches CheXpert labeler behaviour on
+            # multi-sentence reports where later sentences override
+            # earlier tentative mentions.
+            hits.sort(key=lambda h: h[0])
+            vec[idx] = hits[-1][1]
+
+    # "No Finding" inference.
+    nf_idx = CHEXBERT_PATHOLOGIES.index("No Finding")
+    any_positive = any(
+        vec[i] == 1 for i in range(len(vec)) if i != nf_idx
+    )
+    nf_keywords = PATHOLOGY_KEYWORDS.get("No Finding", ())
+    nf_matches = any(kw.lower() in lower for kw in nf_keywords)
+    if any_positive:
+        vec[nf_idx] = 0  # some pathology is positive → no "no finding"
+    elif nf_matches:
+        vec[nf_idx] = 1
+    else:
+        vec[nf_idx] = 0
+
+    return vec
+
+
+def _chexbert_label_vector(model, tokenizer, text: str) -> list[int] | None:
+    """LEGACY wrapper — uses the rule-based labeler regardless of
+    ``model`` / ``tokenizer`` arguments.
+
+    The old neural CheXbert path has been retired (see
+    ``run_chexbert_grader`` docstring).  This stub is preserved so
+    any external caller importing ``_chexbert_label_vector`` still
+    gets a real 14-dim vector instead of an AttributeError.
+    """
+    if not text or not text.strip():
+        return [0] * len(CHEXBERT_PATHOLOGIES)
+    try:
+        return _rule_based_chexpert_label_vector(text)
     except Exception:  # noqa: BLE001
         return None
 

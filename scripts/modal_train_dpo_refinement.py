@@ -1,57 +1,86 @@
-"""Task 3c — Modal H100 DPO-style refinement trainer for ClaimGuard v4.
+"""Task 3c — Modal H100 counterfactual-consistency refinement for ClaimGuard v4.
 
-This script implements the third piece of the ACL 2025 "Dually
-Self-Improved" counterfactual pipeline.  Upstream, Task 3a identifies
-causal token spans (``data/augmentation/causal_term_identifier.py``),
-Task 3b generates counterfactual paraphrases (``counterfactual_generator.py``).
-This script takes a JSON file of ``{claim, evidence, counterfactual}``
-preference pairs and fine-tunes the v3 verifier into v4.
+This script fine-tunes the v3 verifier into v4 using **counterfactual
+consistency regularization** (default) or the legacy DPO loss
+(``--loss-mode dpo``, kept for research comparison only).  Upstream,
+Task 3a identifies causal token spans
+(``data/augmentation/causal_term_identifier.py``) and Task 3b generates
+counterfactual paraphrases that preserve the causal tokens but vary
+the surface form (``counterfactual_generator.py``).  Each
+``{claim, evidence, counterfactual}`` triple gives a pair of inputs
+``(x = claim + evidence, x' = counterfactual + evidence)`` that
+SHOULD receive the same classifier output because they share the
+same causal semantics and same ground-truth label.
 
-**KNOWN ISSUE (2026-04-14 pre-flight, blocks launch).**
-The DPO loss below uses ``chosen = counterfactual, rejected = original``.
-For a binary classifier where BOTH sides carry the same true label
-(contradicted), the naive DPO margin-maximization objective will pull
-the ORIGINAL claim's contradicted score DOWN to expand the margin
-between chosen and rejected, which is the opposite of what the plan
-wants — the goal is to make the verifier SAME-SCORE on original and
-counterfactual (consistency), not to prefer one over the other.
+Why consistency regularization, not DPO (2026-04-14 pre-flight fix)
+-------------------------------------------------------------------
+A prior version of this file used a DPO-style loss with
+``chosen = counterfactual, rejected = original``.  For a binary
+classifier where both sides carry the same true label (contradicted),
+DPO's margin-maximization pulls the ORIGINAL claim's contradicted
+score DOWN to expand the margin, which is the opposite of what we
+want: we want the verifier to produce the SAME score on both sides,
+regardless of surface form.
 
-The correct fix is one of:
+An Opus pre-flight reviewer flagged this as plan-breaking; a follow-
+up literature dive confirmed that the correct formulation for this
+problem is the **R-Drop / UDA** symmetric-KL consistency loss, not
+DPO.  The canonical formulation (R-Drop, Liang et al., NeurIPS 2021,
+arXiv:2106.14448; UDA, Xie et al., NeurIPS 2020, arXiv:1904.12848):
 
-    (A) Replace the DPO loss with a consistency regularizer:
-        ``L = ||logit(y|C) - logit(y|C')||²``
-        This pulls the two scores toward each other without biasing
-        the absolute direction. Matches the Dually Self-Improved
-        paper's core intuition.
+    L = CE(x,  y) + CE(x', y)
+      + λ_cons · (1/2) · [KL(p(·|x)  || stop_grad p(·|x'))
+                          + KL(p(·|x') || stop_grad p(·|x))]
 
-    (B) Regenerate counterfactuals so that "rejected" is a TRUE
-        causal-breaking variant (one where the causal token IS
-        changed, producing the OPPOSITE verdict). Then the DPO pair
-        has different true labels and the margin-maximization is
-        correct. Requires rewriting Task 3b.
+where ``p(·|x)`` is the softmax over the 2 classes, ``y`` is the true
+label, and ``λ_cons ≈ 0.5`` is the consistency weight (R-Drop's GLUE
+sweep settled on ``α ∈ {0.1, 0.5, 1.0}`` depending on task).  The
+``stop_grad`` on the KL targets follows UDA's Eq. 1 and prevents
+double-counting gradients through the "target" side of each KL term.
 
-Resolution required before launching Task 3.  Do not run
-``modal run --detach scripts/modal_train_dpo_refinement.py`` until
-one of (A) or (B) is implemented.  Until then, ship v3 (Task 2
-checkpoint) as the paper's v-current and document the Task 3 abort
-in the Limitations section.
+This loss is already the standard in the text-classification
+literature for counterfactual / augmentation invariance and does
+not suffer from DPO's margin-maximization pathology.  See the
+2026-04-14 literature review in the same commit's message for the
+citation list.
 
-Why a custom DPO loss (not ``trl.DPOTrainer``)?
------------------------------------------------
-``trl.DPOTrainer`` (0.9.x) is hardwired to ``AutoModelForCausalLM`` — it
-computes log-probs over token-level logits.  Our v3 verifier is a
-RoBERTa-large cross-encoder classifier, so we reimplement the Rafailov
-et al. 2023 objective for a 2-class classifier:
+Citation caveat: the original ClaimGuard sprint plan cited an
+"ACL 2025 Dually Self-Improved" paper, which the 2026-04-14
+literature review could not find in arXiv / OpenAlex / ACL Anthology
+/ Semantic Scholar under any variant of the title.  The proposal
+doc has been updated to cite R-Drop (NeurIPS 2021), UDA (NeurIPS
+2020), and Kaushik et al. "Learning the Difference that Makes a
+Difference with Counterfactually-Augmented Data" (ICLR 2020,
+arXiv:1909.12434) instead, all of which are the actual source
+material for this approach.
 
-    chosen   = (counterfactual, evidence)  ← preserves causal tokens
-    rejected = (original claim, evidence)  ← may carry surface shortcuts
+Loss mode summary
+-----------------
+* ``loss_mode="consistency"`` (default, correct): the loss above.
+  Trains v4 to agree on (x, x') without biasing the absolute
+  direction.  Literature-backed and the path that should be used
+  for production runs.
+* ``loss_mode="dpo"`` (legacy, broken): the DPO formulation with
+  chosen=counterfactual and rejected=original.  Kept ONLY for
+  research comparison against the consistency mode; DO NOT use
+  this for the paper's headline v4 checkpoint.
 
-    L_DPO = -E[log σ(β · (log π_θ(y|chosen) - log π_θ(y|rejected)
-                          - log π_ref(y|chosen) + log π_ref(y|rejected)))]
+Shared hyperparameters (both modes)
+-----------------------------------
+* lr = 5e-6                     — same as v3 fine-tune
+* single epoch                  — the counterfactual pool is small
+* batch_size = 8                — ~24 GB VRAM at max_length=256
+* gradient_clip = 1.0           — standard
+* freeze first 8 RoBERTa layers — trains only layers 9-24 + head
+* log reward / CE stats every 100 steps
 
-where y=1 is the contradicted class, π_θ is the trainable policy, and
-π_ref is a frozen copy of v3.  **See KNOWN ISSUE above — this is the
-signature semantic concern that blocks launch.**
+Consistency-mode-specific
+-------------------------
+* ce_weight = 1.0
+* consistency_weight = 0.5 (R-Drop GLUE default range)
+* no DPO early-stop (consistency loss is well-behaved; training runs
+  the full epoch unless CE blows up above 2.5, which would indicate
+  catastrophic label collapse)
 
 Hyperparameters (from plan + Rafailov 2023)
 -------------------------------------------
@@ -101,7 +130,15 @@ APP_NAME = "claimguard-dpo-refinement"
 
 @dataclass
 class DPOTrainingConfig:
-    """Hyperparameters for the DPO refinement run.
+    """Hyperparameters for the Task 3 refinement run.
+
+    The filename + class name retain "DPO" for backward compatibility
+    with existing references, but the default ``loss_mode`` is now
+    ``"consistency"`` (R-Drop style symmetric-KL regularization), which
+    is the literature-standard and correct approach for training a
+    classifier to be invariant between an original claim and its
+    counterfactual paraphrase.  See the top-of-file docstring for the
+    full rationale.
 
     Defaults match the Task 3 plan.  All fields are JSON-serializable.
     """
@@ -115,16 +152,32 @@ class DPOTrainingConfig:
     max_length: int = 256
     batch_size: int = 8
     lr: float = 5e-6
-    beta: float = 0.1
     num_epochs: int = 1
     gradient_clip: float = 1.0
-    kl_max: float = 5.0
-    margin_min: float = 0.0
-    patience: int = 50
     log_every: int = 100
     freeze_first_n_layers: int = 8
     seed: int = 42
     target_label: int = 1  # contradicted class
+
+    # Loss mode selection.  "consistency" is the default (R-Drop /
+    # UDA) and the path that should be used for the paper's v4
+    # checkpoint.  "dpo" is the legacy Rafailov 2023 formulation
+    # with the chosen/rejected inversion bug documented above — kept
+    # ONLY for research comparison; do not use for production.
+    loss_mode: str = "consistency"
+
+    # Consistency-mode hyperparameters (R-Drop defaults)
+    ce_weight: float = 1.0          # weight on CE(original) + CE(counterfactual)
+    consistency_weight: float = 0.5  # λ on symmetric-KL consistency term
+    ce_blowup_threshold: float = 2.5  # abort if mean CE exceeds this
+
+    # DPO-mode hyperparameters (Rafailov 2023 defaults).  Only used
+    # when loss_mode="dpo".  Left in the config for reproducibility
+    # of the legacy path.
+    beta: float = 0.1
+    kl_max: float = 5.0
+    margin_min: float = 0.0
+    patience: int = 50
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -325,6 +378,109 @@ def format_reward_histogram(
 # ---------------------------------------------------------------------------
 # Heavy helpers — torch required.  Imported lazily inside Modal.
 # ---------------------------------------------------------------------------
+
+
+def _consistency_classifier_loss(
+    logits_original: Any,
+    logits_counterfactual: Any,
+    *,
+    target_label: int = 1,
+    ce_weight: float = 1.0,
+    consistency_weight: float = 0.5,
+) -> tuple[Any, float, float, float]:
+    """Counterfactual consistency loss — R-Drop / UDA style.
+
+    For each pair ``(x, x')`` where ``x`` is the original claim+evidence
+    input and ``x'`` is the counterfactual+evidence input, the loss is::
+
+        L = CE(x, y) + CE(x', y)
+          + λ_cons · (1/2) · [KL(p(·|x)  ‖ stop_grad p(·|x'))
+                              + KL(p(·|x') ‖ stop_grad p(·|x))]
+
+    where ``y`` is the ground-truth binary label (target_label, always
+    1 = contradicted for ClaimGuard), ``p(·|·)`` is the softmax over
+    the 2 classes, and ``stop_grad`` on the KL targets prevents
+    double-counting gradients (UDA Eq. 1; R-Drop uses bidirectional
+    with targets detached).
+
+    The CE terms preserve label supervision on BOTH sides so the
+    model doesn't collapse to a uniform distribution just to minimize
+    the consistency KL.  The consistency term pulls the two outputs
+    toward each other without biasing either's absolute direction —
+    exactly the invariance we want for causal-token preservation.
+
+    Hyperparameter choice: R-Drop on GLUE used ``α ∈ {0.1, 0.5, 1.0}``
+    tuned per task.  UDA used ``λ=1.0`` across text tasks.  We default
+    to ``0.5`` as a safe midpoint for RoBERTa-large binary classification.
+
+    Args:
+        logits_original: 2-class logits on the original (claim + evidence)
+            inputs.  Shape ``(B, 2)``.
+        logits_counterfactual: 2-class logits on the counterfactual +
+            evidence inputs.  Same shape.
+        target_label: Which class is "contradicted" in the checkpoint.
+            v1/v3 binary uses 1.
+        ce_weight: Multiplier on the (CE_orig + CE_cf) term.  Default 1.0.
+        consistency_weight: Multiplier on the symmetric-KL term.  Default 0.5.
+
+    Returns:
+        ``(loss_tensor, ce_mean_float, consistency_kl_float, agreement_mean_float)``
+
+        * ``loss_tensor`` — scalar torch Tensor ready for backward().
+        * ``ce_mean_float`` — mean cross-entropy across both sides.
+          Fed into the early-stop "CE blowup" check.
+        * ``consistency_kl_float`` — mean symmetric KL across the
+          batch.  Logged per step so we can see convergence.
+        * ``agreement_mean_float`` — mean ``P(y=target|x') - P(y=target|x)``,
+          which should trend toward 0 as the model becomes consistent.
+          Logged for monitoring.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    # Shared true-label vector.  Both sides share the same label
+    # because the counterfactual is a semantics-preserving paraphrase.
+    target = torch.full(
+        (logits_original.shape[0],),
+        fill_value=int(target_label),
+        dtype=torch.long,
+        device=logits_original.device,
+    )
+
+    ce_orig = F.cross_entropy(logits_original, target, reduction="mean")
+    ce_cf = F.cross_entropy(logits_counterfactual, target, reduction="mean")
+
+    # Symmetric KL with stop-grad on targets (UDA Eq. 1 / R-Drop).
+    log_p_orig = F.log_softmax(logits_original, dim=-1)
+    log_p_cf = F.log_softmax(logits_counterfactual, dim=-1)
+    p_orig = log_p_orig.exp()
+    p_cf = log_p_cf.exp()
+
+    kl_orig_to_cf = F.kl_div(
+        log_p_orig, p_cf.detach(), reduction="batchmean",
+    )
+    kl_cf_to_orig = F.kl_div(
+        log_p_cf, p_orig.detach(), reduction="batchmean",
+    )
+    consistency_kl = 0.5 * (kl_orig_to_cf + kl_cf_to_orig)
+
+    loss = (
+        ce_weight * (ce_orig + ce_cf)
+        + consistency_weight * consistency_kl
+    )
+
+    with torch.no_grad():
+        ce_mean = 0.5 * (ce_orig + ce_cf).item()
+        cons_kl = consistency_kl.item()
+        # Agreement signal: P(target | cf) - P(target | orig).  This
+        # should trend toward zero as the model becomes consistent
+        # between the two inputs.  Signed so we can see which side
+        # is higher on average.
+        p_orig_y = p_orig[:, int(target_label)]
+        p_cf_y = p_cf[:, int(target_label)]
+        agreement = (p_cf_y - p_orig_y).mean().item()
+
+    return loss, ce_mean, cons_kl, agreement
 
 
 def _dpo_classifier_loss(
@@ -550,6 +706,14 @@ def _run_training(config_json: str) -> dict[str, Any]:
     stop_reason: Optional[str] = None
     history: list[dict[str, Any]] = []
 
+    loss_mode = (config.loss_mode or "consistency").lower()
+    if loss_mode not in ("consistency", "dpo"):
+        raise ValueError(
+            f"unknown loss_mode={loss_mode!r}, expected "
+            "'consistency' or 'dpo'"
+        )
+    logger.info("Training loss_mode=%s", loss_mode)
+
     for epoch in range(config.num_epochs):
         rng.shuffle(pairs)
         for start in range(0, len(pairs), config.batch_size):
@@ -557,22 +721,55 @@ def _run_training(config_json: str) -> dict[str, Any]:
             if not batch:
                 continue
 
-            policy_chosen_logits, policy_rejected_logits = _forward(
-                policy_encoder, policy_head, batch
-            )
-            with torch.no_grad():
-                ref_chosen_logits, ref_rejected_logits = _forward(
-                    ref_encoder, ref_head, batch
+            if loss_mode == "consistency":
+                # R-Drop / UDA consistency path (DEFAULT, CORRECT).
+                # We only need the policy model — no reference — but
+                # we compute BOTH sides of the pair in the same
+                # forward call to get matched gradients.  The
+                # reference model is still loaded for legacy/
+                # comparison but is unused in this branch.
+                policy_orig_logits, policy_cf_logits = _forward(
+                    policy_encoder, policy_head, batch
                 )
+                # Note: _forward returns (chosen, rejected) =
+                # (counterfactual, original).  For the consistency
+                # loss we want (original, counterfactual), so we
+                # pass them in that order.
+                loss, ce_mean, cons_kl, agreement = (
+                    _consistency_classifier_loss(
+                        logits_original=policy_cf_logits,  # "rejected" in _forward = original claim
+                        logits_counterfactual=policy_orig_logits,  # "chosen" in _forward = counterfactual
+                        target_label=config.target_label,
+                        ce_weight=config.ce_weight,
+                        consistency_weight=config.consistency_weight,
+                    )
+                )
+                # Monitor signal for logging + early-stop.  In
+                # consistency mode the abort condition is "CE blows
+                # up past ce_blowup_threshold" — if either CE climbs
+                # above 2.5 the model is losing its label signal.
+                margin = ce_mean  # repurposed for the tracker
+                kl_proxy = cons_kl  # repurposed for the tracker
+                chosen_reward = agreement  # repurposed for logging
 
-            loss, margin, kl_proxy, chosen_reward = _dpo_classifier_loss(
-                policy_chosen_logits,
-                policy_rejected_logits,
-                ref_chosen_logits,
-                ref_rejected_logits,
-                beta=config.beta,
-                target_label=config.target_label,
-            )
+            else:
+                # Legacy DPO path (BROKEN — kept for research
+                # comparison only; see top-of-file docstring).
+                policy_chosen_logits, policy_rejected_logits = _forward(
+                    policy_encoder, policy_head, batch
+                )
+                with torch.no_grad():
+                    ref_chosen_logits, ref_rejected_logits = _forward(
+                        ref_encoder, ref_head, batch
+                    )
+                loss, margin, kl_proxy, chosen_reward = _dpo_classifier_loss(
+                    policy_chosen_logits,
+                    policy_rejected_logits,
+                    ref_chosen_logits,
+                    ref_rejected_logits,
+                    beta=config.beta,
+                    target_label=config.target_label,
+                )
 
             optimizer.zero_grad()
             loss.backward()
@@ -583,28 +780,53 @@ def _run_training(config_json: str) -> dict[str, Any]:
             history.append({
                 "step": global_step,
                 "epoch": epoch,
+                "loss_mode": loss_mode,
                 "loss": float(loss.item()),
                 "margin": float(margin),
                 "kl_proxy": float(kl_proxy),
                 "chosen_reward": float(chosen_reward),
             })
 
-            if tracker.update(kl_proxy, margin):
-                stop_reason = tracker.reason
-                logger.warning(
-                    "DPO early-stop triggered at step %d: %s",
-                    global_step, stop_reason,
-                )
-                break
+            # Early-stop logic.  In consistency mode we only abort
+            # on catastrophic CE blowup (the R-Drop loss is well-
+            # behaved and doesn't have DPO's margin-explosion risk).
+            # In DPO mode we keep the original KL/margin tracker.
+            if loss_mode == "consistency":
+                if margin > config.ce_blowup_threshold:
+                    stop_reason = (
+                        f"consistency-mode CE blowup: mean CE "
+                        f"{margin:.3f} > {config.ce_blowup_threshold}"
+                    )
+                    logger.warning(
+                        "Consistency early-stop triggered at step %d: %s",
+                        global_step, stop_reason,
+                    )
+                    break
+            else:
+                if tracker.update(kl_proxy, margin):
+                    stop_reason = tracker.reason
+                    logger.warning(
+                        "DPO early-stop triggered at step %d: %s",
+                        global_step, stop_reason,
+                    )
+                    break
 
             if global_step % config.log_every == 0:
-                logger.info(
-                    "step=%d loss=%.4f margin=%.4f kl=%.4f chosen_reward=%.4f "
-                    "| kl_streak=%d margin_streak=%d",
-                    global_step, loss.item(), margin, kl_proxy,
-                    chosen_reward,
-                    tracker.kl_streak, tracker.margin_streak,
-                )
+                if loss_mode == "consistency":
+                    logger.info(
+                        "step=%d loss=%.4f ce_mean=%.4f cons_kl=%.4f "
+                        "agreement=%+.4f",
+                        global_step, loss.item(), margin, kl_proxy,
+                        chosen_reward,
+                    )
+                else:
+                    logger.info(
+                        "step=%d loss=%.4f margin=%.4f kl=%.4f "
+                        "chosen_reward=%.4f | kl_streak=%d margin_streak=%d",
+                        global_step, loss.item(), margin, kl_proxy,
+                        chosen_reward,
+                        tracker.kl_streak, tracker.margin_streak,
+                    )
                 logger.info(format_reward_histogram(reward_buffer))
 
             global_step += 1
@@ -747,6 +969,31 @@ def _parse_cli(argv: list[str]) -> DPOTrainingConfig:
         type=int, default=defaults.freeze_first_n_layers,
     )
     parser.add_argument("--seed", type=int, default=defaults.seed)
+    # Consistency-mode (default) hyperparameters
+    parser.add_argument(
+        "--loss-mode",
+        choices=("consistency", "dpo"),
+        default=defaults.loss_mode,
+        help=(
+            "'consistency' (default, R-Drop/UDA style symmetric-KL) "
+            "is the correct path for ClaimGuard v4. 'dpo' is the "
+            "legacy Rafailov 2023 DPO loss — kept for research "
+            "comparison only; do NOT use for the paper's headline v4 "
+            "checkpoint (chosen/rejected inversion pathology, see "
+            "top-of-file docstring)."
+        ),
+    )
+    parser.add_argument(
+        "--ce-weight", type=float, default=defaults.ce_weight,
+    )
+    parser.add_argument(
+        "--consistency-weight",
+        type=float, default=defaults.consistency_weight,
+    )
+    parser.add_argument(
+        "--ce-blowup-threshold",
+        type=float, default=defaults.ce_blowup_threshold,
+    )
     args = parser.parse_args(argv)
 
     return DPOTrainingConfig(
@@ -766,6 +1013,10 @@ def _parse_cli(argv: list[str]) -> DPOTrainingConfig:
         log_every=args.log_every,
         freeze_first_n_layers=args.freeze_first_n_layers,
         seed=args.seed,
+        loss_mode=args.loss_mode,
+        ce_weight=args.ce_weight,
+        consistency_weight=args.consistency_weight,
+        ce_blowup_threshold=args.ce_blowup_threshold,
     )
 
 
@@ -805,4 +1056,10 @@ __all__ = [
     "format_reward_histogram",
     "load_preference_pairs",
     "main",
+    # Loss functions — underscore-prefixed because they need torch
+    # (lazy-imported inside the function body), so they're not part
+    # of the pure-Python API surface.  Exposed here so unit tests
+    # that DO have torch can import them directly.
+    "_consistency_classifier_loss",
+    "_dpo_classifier_loss",
 ]
