@@ -301,17 +301,74 @@ def generate_annotation_workbook(
     print(f"Stamping provenance: claim_generator_id={claim_generator_id}")
     print("Evidence generator: openi_radiologist (GT report)")
 
+    # Column-name compatibility shim (2026-04-15 fix).
+    #
+    # Two schemas exist in the wild for the OpenI CSV:
+    #   (a) "study_id" / "report_text"               — used by older
+    #       OpenI dumps and the original generation code
+    #   (b) "deid_patient_id" / "section_findings" + "section_impression"
+    #       — the current CheXpert-style schema written by
+    #       scripts/convert_openi_to_chexpert_schema.py
+    #
+    # The Task 9 launch on 2026-04-15 failed with
+    # ``KeyError: 'study_id'`` because the uploaded CSV is in schema
+    # (b).  We detect the schema at load time and adapt the lookup +
+    # report-text assembly to match.
+    if "study_id" in gt_df.columns:
+        _id_col = "study_id"
+        _report_builder = lambda row: str(row.get("report_text", ""))  # noqa: E731
+    elif "deid_patient_id" in gt_df.columns:
+        _id_col = "deid_patient_id"
+        def _report_builder(row) -> str:
+            findings = str(row.get("section_findings", "") or "")
+            impression = str(row.get("section_impression", "") or "")
+            parts = []
+            if findings.strip():
+                parts.append(f"Findings: {findings.strip()}")
+            if impression.strip():
+                parts.append(f"Impression: {impression.strip()}")
+            return "\n".join(parts)
+    else:
+        raise KeyError(
+            f"CSV at {openi_reports_csv} has neither 'study_id' nor "
+            f"'deid_patient_id' column.  Columns found: "
+            f"{list(gt_df.columns)[:8]}..."
+        )
+    print(f"OpenI CSV schema: using id_col={_id_col!r}")
+
     workbook_entries: list[dict] = []
     claim_id = 0
     for img_file, report_text in generated_reports.items():
         sentences = _split_to_sentences(report_text)
         base_name = img_file.replace(".png", "")
-        gt_row = gt_df[
-            gt_df["study_id"].astype(str).str.contains(base_name, na=False)
-        ]
+
+        # Extract the patient prefix from the image filename.  OpenI
+        # filenames follow ``CXR<N>_IM-<X>-<Y>.png`` where CXR<N> is
+        # the de-identified patient id.  The CheXpert-schema CSV keys
+        # on CXR<N> only, so we need the prefix, not the full stem.
+        patient_prefix = base_name.split("_")[0] if "_" in base_name else base_name
+
+        # First try exact-match on the patient prefix (new schema
+        # path), then fall back to substring-match on the full
+        # base_name (old "study_id" path) so both schemas work.
+        if _id_col == "deid_patient_id":
+            gt_row = gt_df[gt_df[_id_col].astype(str) == patient_prefix]
+            if len(gt_row) == 0:
+                gt_row = gt_df[
+                    gt_df[_id_col].astype(str).str.contains(
+                        patient_prefix, na=False
+                    )
+                ]
+        else:
+            gt_row = gt_df[
+                gt_df[_id_col].astype(str).str.contains(
+                    base_name, na=False
+                )
+            ]
+
         gt_text = ""
         if len(gt_row) > 0:
-            gt_text = str(gt_row.iloc[0].get("report_text", ""))
+            gt_text = _report_builder(gt_row.iloc[0])
 
         # Provenance stamp shared across all claims from this image/report.
         # claim_generator_id identifies the CheXagent run that produced

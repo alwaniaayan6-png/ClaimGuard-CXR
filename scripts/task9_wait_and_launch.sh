@@ -82,7 +82,13 @@ log ""
 caffeinate -i python3 "$LAUNCHER" \
     --handles-path "$HANDLES_JSON" \
     < /dev/null 2>&1 | sed 's/^/LAUNCHER | /'
-launcher_exit=$?
+# ${PIPESTATUS[0]} is python3's exit code, NOT sed's.  Without this,
+# any launcher failure would be masked by sed's success exit code 0,
+# and the pipeline wrapper would falsely report "COMPLETED
+# successfully" even when the launcher crashed.  This bit me on the
+# 2026-04-15 Task 9 run when the generation code hit a KeyError and
+# the wrapper declared victory.
+launcher_exit=${PIPESTATUS[0]}
 
 log ""
 log "Launcher exited with code $launcher_exit"
