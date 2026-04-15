@@ -1,28 +1,32 @@
 # Handoff: ClaimGuard-CXR Task 9 Real Dual-Run + v3 Sprint Continuation
 
-**Date:** 2026-04-15 ~10:00 ET
-**Status:** active — real CheXagent dual-run Modal jobs complete (both sides), orchestrator firing scoring now; user asleep, session running autonomously per instructions.
+**Date:** 2026-04-15 ~17:00 ET (updated after Task 6 + Task 9 LANDED)
+**Status:** active — Task 2 + Task 6 + Task 9 all COMPLETE with real numbers; 559/559 tests green; 13+ commits local (awaiting user push approval). Tasks 1, 3, 8 still blocked on user-only actions.
 **Last session model:** claude-opus-4-6 / claude-opus-4-1-20250805 (pre-flight reviews all Opus)
 
 ---
 
 ## Current State (1-paragraph)
 
-v3 sprint is ~75% done: Task 2 v3 retrain **COMPLETED** (val_acc 0.9877, checkpoint on volume), Task 9 real CheXagent dual-run **COMPLETED** on both sides (run A: 414 claims / 100 images / 0 errors, run B: 401 claims / 100 images / 0 errors, both with real radiology text validated — e.g., *"No pleural effusion or pneumothorax is seen. The cardiac and mediastinal silhouettes are unremarkable."*). The CPU orchestrator is mid-scoring (`fc-01KP8PJD5VJNYS5FNAH4MHB3MC`) and will write `/same_model_experiment/real/gate_demo.json` when done. Tasks 1/3/8 remain blocked on credentials/human time; Task 6 is pending Task 9's scored output. ~10 commits pushed to GitHub this session. Doc-sync green. Preflight reviewer rule now global.
+**v3 sprint is ~85% done.** Task 2 v3 retrain **COMPLETED** (val_acc 0.9877, 16 MB of v3 training data, checkpoint at `/data/checkpoints/verifier_binary_v3/best_verifier.pt` on volume). Task 9 provenance-gate real CheXagent dual-run **COMPLETED** with `downgrade_rate_diff = 1.00` on 828 pairs (100% same-model downgrade, 0% cross-model), bundled with three mid-run architectural fixes (D20–D22: Modal image missing `add_local_python_source("inference")`, `_load_v1_verifier` wrong architecture, sanity probes off-distribution). Task 6 v3 OpenI recalibrated eval **COMPLETED** with inverted cfBH FDR 0.0088/0.0050/0.0050/0.0344 at α=0.05/0.10/0.15/0.20 — **FDR holds at every α on cross-dataset transfer** despite raw accuracy dropping from 0.9877 to 0.7545. StratCP baseline runs; forward cfBH collapses as expected (D24). Post-hoc Opus reviewer on Task 9 flagged a critical framing issue: 396/414 run-A/run-B reports are byte-identical because CheXagent is extremely low-entropy on OpenI (27 unique reports per run); proposal + manuscript rewritten to state this directly and reframe as a stronger contribution. Tasks 1/3/8 remain blocked on credentials/human time. 13 commits local this session, none pushed yet. Budget spent: $21 of $900 cap. 559/559 tests green across 16 test files.
 
 ---
 
-## What's Running / In Progress (Modal FunctionCalls)
+## What Ran / In Progress (Modal FunctionCalls)
 
-**ALL IDs live in `/tmp/task9_real_*.json` sidecars — use these first.**
+**Nothing is running now.** All jobs from this session have completed.
+Sidecar JSONs preserved in `/tmp/task9_real_*.json` and
+`/tmp/task9_function_calls*.json` for audit.
 
-| Name | FunctionCall ID | Kind | Status | ETA |
-|---|---|---|---|---|
-| CheXagent run A | `fc-01KP8PHQE0T5BP1RR1N29ZK6R1` | H100 | **DONE** (414 claims, 100 imgs, 0 errors) | — |
-| CheXagent run B | `fc-01KP8PHQJ79EPPDD63E57YB1D8` | H100 | **DONE** (401 claims, 100 imgs, 0 errors) | — |
-| Real orchestrator (scoring) | `fc-01KP8PJD5VJNYS5FNAH4MHB3MC` | CPU → H100 scoring | **RUNNING** | ~10–20 min |
-| Plan C scoring (backup, stub data) | `fc-01KP8MBX7XQ3WQHH1FKH3CMWK9` | H100 | RUNNING | ≤15 min |
-| Monitor (network-resilient poll) | task_id `b85uy7298` | local Bash | RUNNING | up to 60 min |
+| Name | FunctionCall ID | Kind | Final Status |
+|---|---|---|---|
+| CheXagent run A | `fc-01KP8PHQE0T5BP1RR1N29ZK6R1` | H100 | DONE (414 claims / 100 imgs / 0 errors) |
+| CheXagent run B | `fc-01KP8PHQJ79EPPDD63E57YB1D8` | H100 | DONE (401 claims / 100 imgs / 0 errors) |
+| Original orchestrator (crashed) | `fc-01KP8PJD5VJNYS5FNAH4MHB3MC` | CPU | **Silently crashed at import** — missing `add_local_python_source("inference")`. Modal kept restarting the crashed container while client reported RUNNING. Diagnosed from `modal app logs ap-N7KOT599Q60g7rnT0DwQJG`. |
+| Plan C scoring (backup, stub) | `fc-01KP8MBX7XQ3WQHH1FKH3CMWK9` | H100 | Eventually completed (backup only, not used) |
+| Fixed scoring v2 (trapped by D21) | `fc-01KP9BDF1YZ204ANR9F4TXF1C7` | H100 | Exited via `RuntimeError` from `_sanity_check_verifier` (sup=0.2063 con=0.2029 margin=0.0034 < 0.1). This is the sanity check doing its job: caught silent wrong-architecture loader before wasting inference. |
+| **Fixed scoring v3 (LANDED)** | `fc-01KP9EDRARB8YGM1SR7BN2Q8HA` | H100 | **DONE** — 828 rows, downgrade_rate_diff = 1.00, gate_demo.json written to `/data/same_model_experiment/real/gate_demo.json`. |
+| v3 OpenI modal_run_evaluation | Modal app `ap-U5OPo32fr5AOmkNOCT2Xmo` | H100 | DONE — test accuracy 0.7545, FDR ≤ α at every level (Task 6 main result). Output on `eval_results_openi_v3/`. |
 
 **How to check each:**
 ```bash
@@ -120,20 +124,15 @@ Expected: same-model condition downgrade_rate > 0.5; independent condition downg
 
 ## Pending Tasks (priority order)
 
-1. **Wait for orchestrator → download gate_demo.json → validate `downgrade_rate > 0.5`.**
-   - Blocked by: orchestrator `fc-01KP8PJD5VJNYS5FNAH4MHB3MC` still running
-   - Files to touch: `/same_model_experiment/real/gate_demo.json` (read-only on volume)
-   - Pass bar: same-model downgrade_rate > 0.5, independent downgrade_rate ≈ 0, median (claimA, evidenceA) verifier score > 0.9 on claims that disagree with ground-truth OpenI report
-   - On pass → commit results table into `CLAIMGUARD_PROPOSAL.md` §Same-model failure-mode case study and `MANUSCRIPT_MINI.md` Limitation (6) expansion
-   - On fail → halt, do not doc-sync; investigate whether `_sanity_check_verifier` fires, whether provenance stamping is correct, whether tier classification is right
+1. **~~Task 9 validation~~** — **DONE**. `downgrade_rate_diff = 1.00`
+   on 828 pairs. Result committed in `ab74f4d`. Reviewer-flagged
+   framing fix (96% byte-identical reports) committed in `da35d43`.
 
-2. **Task 6 — Recalibrated OpenI + StratCP baseline** (after Task 9 scored output lands)
-   - Blocked by: needs v3 verifier scored claims as input
-   - Files: `scripts/run_openi_recalibrated_eval.py` (new), `inference/stratcp.py` (new), `scripts/baseline_stratcp.py` (new), `tests/test_stratcp.py` (new)
-   - Patient-level 50/50 split on `/Users/aayanalwani/data/openi/openi_cxr_chexpert_schema.csv` via `random.Random(42)`
-   - Per-pathology FDR + power, StratCP comparison (medRxiv Feb 2026 algorithm — no public reference implementation, validate on synthetic Gaussian strata first)
-   - If our StratCP diverges from paper numbers by > 2 pp → park as partial baseline with caveat
-   - Compute ~$2, 10 min H100
+2. **~~Task 6 — Recalibrated OpenI + StratCP baseline~~** — **DONE**.
+   Three-method comparison landed. Inverted cfBH FDR holds at every
+   α; StratCP overshoots (expected, miscoverage not FDR); forward
+   cfBH collapses to n_green=0 (D24). Result committed in `da35d43`.
+   Artifacts: `results/task6/v3_openi/summary.{json,csv}`.
 
 3. **Task 1 — Silver-standard graders** (blocked on credentials — user action)
    - Needs: `modal secret create anthropic ANTHROPIC_API_KEY=...`
