@@ -279,6 +279,8 @@ def generate_annotation_workbook(
     if sampling:
         gen_kwargs.update(temperature=float(temperature), top_p=float(top_p))
 
+    empty_outputs = 0
+    debug_samples_printed = 0
     for img_file in tqdm(image_files, desc=f"CheXagent:{run_id}"):
         img_path = os.path.join(openi_images_dir, img_file)
         try:
@@ -294,11 +296,22 @@ def generate_annotation_workbook(
                 tokenizer=tokenizer,
                 image_processor=image_processor,
                 image=image,
+                image_path=img_path,  # NEW: passed for from_list_format path
                 prompt=DEFAULT_PROMPT,
                 device=device,
                 gen_kwargs=gen_kwargs,
             )
             generated_reports[img_file] = text
+            if not text.strip():
+                empty_outputs += 1
+            elif debug_samples_printed < 3:
+                # Print a few sample outputs so the Modal logs show
+                # what CheXagent is actually producing.  Essential for
+                # debugging empty-output regressions like the one
+                # hunted on 2026-04-15.
+                print(f"  sample[{debug_samples_printed}] {img_file}: "
+                      f"{text[:200]!r}")
+                debug_samples_printed += 1
 
         except Exception as e:  # noqa: BLE001
             errors += 1
@@ -306,7 +319,16 @@ def generate_annotation_workbook(
                 print(f"Error on {img_file}: {e}")
             generated_reports[img_file] = f"[Generation error: {str(e)[:120]}]"
 
-    print(f"Generated {len(generated_reports)} reports ({errors} errors)")
+    print(
+        f"Generated {len(generated_reports)} reports "
+        f"({errors} errors, {empty_outputs} empty)"
+    )
+    if empty_outputs > len(generated_reports) // 2:
+        print(
+            "WARN: more than half of outputs were empty — CheXagent "
+            "prompt format may still be wrong.  Check the sample "
+            "outputs printed above."
+        )
 
     # -------- Workbook build --------
     claim_generator_id = (
@@ -578,55 +600,132 @@ def _run_single_image(
     tokenizer,
     image_processor,
     image,
+    image_path: str | None,
     prompt: str,
     device,
     gen_kwargs: dict,
 ) -> str:
-    """Run a single forward pass, preferring the processor path.
+    """Run a single forward pass on CheXagent (Qwen-VL base).
 
-    Returns the decoded generated string with the prompt stripped off.
-    Any exception propagates — the caller logs it as a per-image error.
+    CheXagent-8b uses the Qwen-VL architecture, which requires a
+    specific multimodal prompt format where the image is referenced
+    inline as ``<img>PATH</img>\\n`` via
+    ``tokenizer.from_list_format([{"image": path}, {"text": prompt}])``.
+
+    The 2026-04-15 v3 launch discovered this the hard way: the prior
+    code used ``processor(images=image, text=prompt)`` which is the
+    generic HF multimodal pattern.  On CheXagent that path constructs
+    input_ids with no image placeholder token, so the vision tower
+    is never actually conditioned on the pixels.  The text-only
+    language model head then generates `</s>` (EOS token id 2)
+    immediately or echoes the prompt, producing zero useful tokens.
+    Stripping the prompt leaves an empty string, and the workbook
+    ends up with 0-1 claims per 100 images.
+
+    This function now tries three strategies in order:
+
+        1. ``tokenizer.from_list_format`` — CheXagent's documented
+           Qwen-VL pattern.  Requires a file path (not a PIL image)
+           so the caller must pass ``image_path``.
+        2. Chat template with inline ``<image>`` token in the text.
+        3. Fallback: generic ``processor(images, text)``.
+
+    Each strategy is tried in-line, with EXCEPTIONS propagating
+    through to the next strategy.  The first strategy that produces
+    a non-empty decoded generation wins.  If all three fail, we
+    raise a ``RuntimeError`` so the caller logs it as an error.
+
+    Args:
+        image_path: Filesystem path to the image.  Required for the
+            from_list_format path.  ``None`` disables that strategy.
     """
     import torch
 
-    # ---- Path 1: AutoProcessor (preferred when it works) ----
-    if processor is not None:
+    # ---- Strategy 1: tokenizer.from_list_format (CheXagent native) ----
+    if (
+        image_path is not None
+        and tokenizer is not None
+        and hasattr(tokenizer, "from_list_format")
+    ):
         try:
-            inputs = processor(
-                images=image,
-                text=prompt,
-                return_tensors="pt",
+            query = tokenizer.from_list_format([
+                {"image": image_path},
+                {"text": prompt},
+            ])
+            tok_out = tokenizer(
+                query, return_tensors="pt"
             ).to(device)
             with torch.no_grad():
-                output_ids = model.generate(**inputs, **gen_kwargs)
-            text = (tokenizer or processor).decode(  # type: ignore[union-attr]
+                output_ids = model.generate(
+                    input_ids=tok_out["input_ids"],
+                    attention_mask=tok_out.get("attention_mask"),
+                    **gen_kwargs,
+                )
+            text = tokenizer.decode(
                 output_ids[0], skip_special_tokens=True
             )
-            return _strip_prompt(text, prompt)
-        except Exception:
-            # Fall through to manual path — do NOT re-raise here, the
-            # manual path is the whole reason this function exists.
-            pass
+            stripped = _strip_prompt(text, query)
+            if not stripped:
+                stripped = _strip_prompt(text, prompt)
+            if stripped:
+                return stripped
+        except Exception as e:  # noqa: BLE001
+            print(f"  from_list_format path failed: {e}")
 
-    # ---- Path 2: Manual tokenizer + image_processor ----
-    if tokenizer is None or image_processor is None:
-        raise RuntimeError("no usable processor/tokenizer pair")
+    # ---- Strategy 2: chat template with explicit <image> token ----
+    if processor is not None:
+        for image_tok in ("<image>\n", "<|image|>\n", ""):
+            try:
+                wrapped_prompt = f"{image_tok}{prompt}" if image_tok else prompt
+                inputs = processor(
+                    images=image,
+                    text=wrapped_prompt,
+                    return_tensors="pt",
+                ).to(device)
+                with torch.no_grad():
+                    output_ids = model.generate(**inputs, **gen_kwargs)
+                text = (tokenizer or processor).decode(  # type: ignore[union-attr]
+                    output_ids[0], skip_special_tokens=True
+                )
+                stripped = _strip_prompt(text, wrapped_prompt)
+                if not stripped:
+                    stripped = _strip_prompt(text, prompt)
+                if stripped:
+                    return stripped
+            except Exception as e:  # noqa: BLE001
+                print(f"  processor path (tok={image_tok!r}) failed: {e}")
+                continue
 
-    tok_out = tokenizer(prompt, return_tensors="pt").to(device)
-    img_out = image_processor(images=image, return_tensors="pt").to(device)
-    pixel_values = img_out.get("pixel_values")
-    if pixel_values is None:
-        raise RuntimeError("image_processor did not return pixel_values")
+    # ---- Strategy 3: manual tokenizer + image_processor ----
+    if tokenizer is not None and image_processor is not None:
+        try:
+            tok_out = tokenizer(prompt, return_tensors="pt").to(device)
+            img_out = image_processor(
+                images=image, return_tensors="pt",
+            ).to(device)
+            pixel_values = img_out.get("pixel_values")
+            if pixel_values is not None:
+                with torch.no_grad():
+                    output_ids = model.generate(
+                        input_ids=tok_out["input_ids"],
+                        attention_mask=tok_out.get("attention_mask"),
+                        pixel_values=pixel_values,
+                        **gen_kwargs,
+                    )
+                text = tokenizer.decode(
+                    output_ids[0], skip_special_tokens=True,
+                )
+                stripped = _strip_prompt(text, prompt)
+                if stripped:
+                    return stripped
+        except Exception as e:  # noqa: BLE001
+            print(f"  manual path failed: {e}")
 
-    with torch.no_grad():
-        output_ids = model.generate(
-            input_ids=tok_out["input_ids"],
-            attention_mask=tok_out.get("attention_mask"),
-            pixel_values=pixel_values,
-            **gen_kwargs,
-        )
-    text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    return _strip_prompt(text, prompt)
+    raise RuntimeError(
+        "all CheXagent inference strategies returned empty output — "
+        "the model loaded but no strategy produced non-empty text. "
+        "Check the prompt format for this specific CheXagent release."
+    )
 
 
 def _strip_prompt(text: str, prompt: str) -> str:

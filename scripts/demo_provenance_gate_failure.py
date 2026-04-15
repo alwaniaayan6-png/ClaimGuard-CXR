@@ -969,6 +969,7 @@ def _run_demo(config_json: str) -> dict[str, Any]:
 app: Any = None
 volume: Any = None
 demo_provenance_gate_remote: Any = None
+task9_orchestrator_remote: Any = None
 
 try:
     import modal as _modal  # noqa: WPS433
@@ -995,6 +996,139 @@ try:
     def demo_provenance_gate_remote(config_json: str) -> dict[str, Any]:  # noqa: F811
         """Modal entry stub that calls the full dual-run demo."""
         return _run_demo(config_json)
+
+    @app.function(  # type: ignore[misc]
+        cpu=1.0,
+        timeout=60 * 60 * 3,  # 3h cap — generation is 30-45 min + scoring 10 min + slack
+        volumes={"/data": volume},
+    )
+    def task9_orchestrator_remote(
+        config_json: str,
+        *,
+        poll_interval_sec: int = 60,
+        max_poll_minutes: int = 150,
+    ) -> dict[str, Any]:  # noqa: F811
+        """Server-side orchestrator for Task 9 — survives local Mac sleep.
+
+        Strategy: poll the shared volume for the two generation
+        workbooks (which the locally-spawned
+        ``generate_annotation_workbook`` calls are writing).  Once
+        both workbooks exist and are non-empty, invoke the scoring
+        phase in-process (still on this container, NO nested
+        ``.remote()`` call needed because we just call ``_run_demo``
+        directly).
+
+        Why a CPU container instead of H100: the scoring phase needs
+        H100 for the verifier, but the orchestrator itself just polls
+        + chains.  Running the whole chain on H100 would waste ~1h of
+        H100 time.  Instead, we use CPU for the polling and delegate
+        scoring via ``demo_provenance_gate_remote.remote()`` (which
+        spawns a fresh H100 container for ~5 minutes).
+
+        Actually — simpler: this orchestrator DOES run on CPU and
+        just waits for the workbooks, then it ``.remote()``-calls
+        ``demo_provenance_gate_remote`` to fire the H100 scoring
+        phase, then ``.get()``-waits for scoring to finish.  Both
+        ``.remote()`` and ``.get()`` are server-side calls from
+        inside the Modal cluster, so they are robust to any client
+        disconnects.
+
+        Args:
+            config_json: Serialized ``GateDemoConfig``.  Must have
+                ``workbook_a_path`` and ``workbook_b_path`` pointing
+                at where the upstream generation runs are writing
+                their outputs.
+            poll_interval_sec: Seconds between workbook existence
+                polls.  60s is a reasonable default — longer wastes
+                Modal logs, shorter wastes CPU.
+            max_poll_minutes: Overall timeout on waiting for both
+                workbooks.  150 min default — run A + run B cold-
+                start (CheXagent ~15 GB download + warmup) plus
+                generation should land well under 90 min.
+
+        Returns:
+            The dict returned by ``demo_provenance_gate_remote``
+            (stats + rows_path + stats_path + n_pairs) — same
+            contract as ``main()``.
+
+        Raises:
+            TimeoutError: if both workbooks still don't exist after
+                ``max_poll_minutes``.
+            RuntimeError: if the scoring phase fails.
+        """
+        import time
+
+        local_logger = logging.getLogger("task9_orchestrator")
+        local_logger.setLevel(logging.INFO)
+        if not local_logger.handlers:
+            h = logging.StreamHandler()
+            h.setFormatter(logging.Formatter(
+                "%(asctime)s | ORCH | %(levelname)s | %(message)s"
+            ))
+            local_logger.addHandler(h)
+
+        cfg = GateDemoConfig.from_json(config_json)
+        local_logger.info("orchestrator started; waiting for workbooks")
+        local_logger.info("  A=%s", cfg.workbook_a_path)
+        local_logger.info("  B=%s", cfg.workbook_b_path)
+
+        # Force a volume reload on each poll — volumes mounted inside
+        # Modal functions are snapshotted at container start, so new
+        # files written by other functions aren't visible until we
+        # explicitly reload.
+        deadline = time.monotonic() + max_poll_minutes * 60
+        poll_count = 0
+        while True:
+            poll_count += 1
+            try:
+                volume.reload()
+            except Exception as e:  # noqa: BLE001
+                local_logger.warning(
+                    "volume.reload() failed (poll %d): %s", poll_count, e,
+                )
+
+            a_ready = (
+                os.path.exists(cfg.workbook_a_path)
+                and os.path.getsize(cfg.workbook_a_path) > 100
+            )
+            b_ready = (
+                os.path.exists(cfg.workbook_b_path)
+                and os.path.getsize(cfg.workbook_b_path) > 100
+            )
+            local_logger.info(
+                "poll %d: A_ready=%s B_ready=%s",
+                poll_count, a_ready, b_ready,
+            )
+            if a_ready and b_ready:
+                break
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"workbooks did not land within "
+                    f"{max_poll_minutes} min. "
+                    f"A_ready={a_ready} B_ready={b_ready}. "
+                    f"Check the claimguard-real-hallucinations app "
+                    f"logs — generation may have failed upstream."
+                )
+            time.sleep(poll_interval_sec)
+
+        local_logger.info(
+            "both workbooks present; spawning scoring phase on H100"
+        )
+
+        # Force skip_generation=True so the scoring container doesn't
+        # try to re-invoke CheXagent.  Clone the config with that
+        # field overridden.
+        scoring_cfg = GateDemoConfig.from_json(config_json)
+        scoring_cfg_dict = asdict(scoring_cfg)
+        scoring_cfg_dict["skip_generation"] = True
+        scoring_cfg_json = json.dumps(scoring_cfg_dict)
+
+        # In-cluster `.remote()` blocks until the H100 container
+        # finishes scoring — typically 5-10 min.  No local client
+        # involvement, so safe against Mac sleep.
+        result = demo_provenance_gate_remote.remote(scoring_cfg_json)
+        local_logger.info("scoring complete: %s", result)
+        return result
 
 except Exception as _modal_err:  # noqa: BLE001
     logger.info(
