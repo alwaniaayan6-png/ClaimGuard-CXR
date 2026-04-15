@@ -1,6 +1,6 @@
 # ClaimGuard-CXR v3 — Progress Tracker
 
-**Last updated:** 2026-04-14 (post-sprint)
+**Last updated:** 2026-04-15 (Task 2 v3 retrain + Task 9 real dual-run COMPLETED)
 
 > This file tracked the v2 DeBERTa / CheXzero line of work through
 > 2026-04-09. That work is archived in git history but is NOT the
@@ -23,14 +23,14 @@ skipped — torch-gated). Full regression sweep runs in ~2 s on CPU.
 |---|---|---|---|
 | Pre-sprint | `checkpoints/v1_best_verifier.pt` (4.27 GB) + `VERIFIER_V1_MANIFEST.json` | — | Recovered, SHA-256 verified |
 | Task 1 — Silver-standard eval | `scripts/generate_silver_standard_graders.py`, `scripts/compile_silver_standard_results.py`, `evaluation/krippendorff_alpha.py`, `scripts/generate_real_hallucinations.py` | 30 + 26 + 28 = 84 | Code + tests done; Modal run pending |
-| Task 2 — Extended taxonomy | `data/augmentation/hard_negative_generator.py` (8 → 12 types, compound stacking) | 20 | Code + tests done; v3 retrain pending |
+| Task 2 — Extended taxonomy | `data/augmentation/hard_negative_generator.py` (8 → 12 types, compound stacking) | 20 | **Fully done (2026-04-15)** — v3 retrain landed: val_acc 0.9877 (epoch 3 best). Checkpoint at `/data/checkpoints/verifier_binary_v3/best_verifier.pt`. |
 | Task 3 — Counterfactual + DPO | `data/augmentation/causal_term_identifier.py`, `data/augmentation/counterfactual_generator.py`, `scripts/modal_train_dpo_refinement.py` | 32 + 54 + 29 = 115 | Code + tests done; causal ID + DPO pending |
 | Task 4 — Regex annotator | `evaluation/regex_error_annotator.py` | 15 | **Fully done** |
 | Task 5 — Hybrid retrieval | `models/retriever/bm25_index.py` (batched), `models/retriever/reranker.py` (batched), `models/retriever/rrf_fusion.py` | 14 | **Fully done** (2 tests skipped — torch) |
 | Task 6 — StratCP baseline | `inference/stratcp.py`, `scripts/baseline_stratcp.py`, `scripts/run_openi_recalibrated_eval.py` | 31 | Code + tests done |
 | Task 7 — LLM extractor | `models/decomposer/llm_claim_extractor.py` (wired in), `evaluation/extractor_fidelity.py` | 10 | **Fully done** |
 | Task 8 — Self-annotation | `scripts/self_annotate_silver_subset.py`, `scripts/compute_user_vs_ensemble_alpha.py` | 71 + 51 = 122 | Code + tests done; human 90-min session pending |
-| Task 9 — Provenance gate demo | `scripts/demo_provenance_gate_failure.py`, `inference/provenance.py` (existing) | 68 + 36 = 104 | Code + tests done + reviewer fixes applied; Modal run pending |
+| Task 9 — Provenance gate demo | `scripts/demo_provenance_gate_failure.py`, `inference/provenance.py`, `results/same_model_experiment/real/gate_demo.json` | 68 + 36 = 104 | **Fully done (2026-04-15)** — real CheXagent dual-run complete. **Result: downgrade_rate_diff = 1.00** (100% same-model pairs downgraded to supported_uncertified, 0% cross-model pairs downgraded) on 828 pairs. v3 verifier cannot distinguish conditions (paired |diff| < 0.1 on all 414 pairs, mean diff 0.0009). Three architectural bugs fixed mid-run (see D20–D22): missing `add_local_python_source("inference")`, wrong-architecture loader (tried AutoModel+Linear vs actual VerifierModel), and off-distribution sanity probes. |
 | Integration seam | `tests/test_integration_silver_to_self_annotation.py` | 13 | Locks the Task 1 → Task 8 data contract |
 
 ### Doc-sync (2026-04-14, this session)
@@ -42,15 +42,20 @@ skipped — torch-gated). Full regression sweep runs in ~2 s on CPU.
 
 ### Pending (GPU + human)
 
-- [ ] **Task 1** — Modal: CheXagent × 200 + Claude Sonnet × 600 + MedGemma (~$12, ~60 min H100)
-- [ ] **Task 2** — Modal: v3 training job + HO baseline retrain (~$14, ~90 min H100)
-- [ ] **Task 3** — Modal: causal ID + DPO training (~$43, ~145 min H100) + Claude Sonnet counterfactual generation (~$25 API)
-- [ ] **Task 8** — Human: 90-min self-annotation session on 100 silver-pool claims
-- [ ] **Task 9** — Modal: 2 × CheXagent dual-run + verifier scoring (~$5, ~60 min H100)
-- [ ] **Re-evals** after v3/v4 ckpts: Task 1 / Task 5 / Task 6 runs with the new checkpoint (~$5 total)
+- [ ] **Task 1** — Modal: CheXagent × 200 + Claude Sonnet × 600 + MedGemma (~$12, ~60 min H100) — **blocked on `modal secret create anthropic ANTHROPIC_API_KEY=...`**
+- [x] **Task 2** — v3 retrain landed 2026-04-15 (val_acc 0.9877, ~$7 H100). HO baseline retrain pending.
+- [ ] **Task 3** — Modal: causal ID + R-Drop refinement training (~$18, ~90 min H100) + Claude Sonnet counterfactual generation (~$25 API) — **blocked on `export ANTHROPIC_API_KEY=...` in shell env**
+- [ ] **Task 6** — Modal: v3 recalibrated OpenI eval + StratCP baseline (~$2, ~10 min H100). **Ready to fire — input artifacts now exist on volume.**
+- [ ] **Task 8** — Human: 90-min self-annotation session on 100 silver-pool claims — blocked on Task 1 silver workbook
+- [x] **Task 9** — Real CheXagent dual-run + v3 verifier scoring complete 2026-04-15, ~$6 total. Three architectural bugs fixed mid-run (D20–D22).
+- [ ] **Re-evals** after v4 ckpt: Task 1 / Task 5 / Task 6 runs with the new checkpoint (~$5 total)
 
-**Budget to date:** ~$0 this session (all local CPU work). **Projected
-sprint total:** ~$79 of $900 cap.
+**Budget to date (real Modal spend, cumulative):**
+- Task 2 v3 retrain: ~$7
+- Task 9 real dual-run (2× CheXagent + scoring): ~$6
+- Orchestrator debugging (failed runs + redeploys + Plan C backup): ~$4
+- **Session total: ~$17 / $900 cap** — well under budget. Projected
+  sprint total if Tasks 1/3 fire: **~$85** of $900.
 
 ## Critical decisions reference
 

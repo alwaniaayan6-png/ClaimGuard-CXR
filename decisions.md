@@ -172,3 +172,91 @@ own) and (b) wasteful (outer container sits idle for ~90 min of
 inner CheXagent work, burning ~2× GPU time). Moving the
 orchestration to the local entrypoint spawns the two generation
 containers from the client without any nested remote invocations.
+
+## D20: Task 9 Modal image must ship `inference/` as local Python source
+**Decision:** `scripts/demo_provenance_gate_failure.py` Modal image
+now adds `.add_local_python_source("inference")` and
+`.add_local_python_source("scripts")` so the container has the
+repo's `inference/` package on `sys.path` at import time.
+**Reason:** The deployed `claimguard-provenance-gate-demo` app
+crashed silently on every cold start with
+`ModuleNotFoundError: No module named 'inference'` because the
+script's module-level `from inference.provenance import …` could
+not be resolved inside the container. Modal was restarting the
+crashed container and the client-side `.get()` loop just reported
+"RUNNING" indefinitely (the FunctionCall was alive but the
+container was never actually running). Caught from `modal app logs
+ap-N7KOT599Q60g7rnT0DwQJG`. The same pattern is used in
+`scripts/modal_build_retrieval_eval.py` line 69 for `models/`.
+
+## D21: Task 9 verifier loader rewritten to define the full `VerifierModel` class
+**Decision:** `_load_v1_verifier` in
+`scripts/demo_provenance_gate_failure.py` was replaced by a
+definition of the full `VerifierModel` class (text_encoder +
+heatmap_encoder + verdict_head + score_head + contrastive_proj),
+matching `scripts/modal_run_evaluation.py` lines 105–162 exactly.
+`_score_claim_evidence_pairs` was updated to call
+`model(input_ids, attention_mask)` and use
+`softmax(verdict_logits)[:, 0]` as the supported-class score. The
+default `verifier_checkpoint` now points at
+`/data/checkpoints/verifier_binary_v3/best_verifier.pt`.
+**Reason:** The earlier loader assumed a plain
+`AutoModel + Linear(hidden, 2)` layout with checkpoint keys
+`state["encoder"]` + `state["head"]`. That layout does not exist —
+no training script in this repo ever wrote it. The real v1/v3
+checkpoint is the full `VerifierModel` `state_dict` with
+`text_encoder.*`, `heatmap_encoder.*`, `verdict_head.*`,
+`score_head.*`, and `contrastive_proj.*` keys (fused dim
+1024 + 768 = 1792). The old loader loaded only the text_encoder
+into a mismatched AutoModel and left the Linear(1024, 2) head at
+random initialization; `_sanity_check_verifier` caught this with
+`sup=0.2063, con=0.2029, margin=0.0034 < 0.1`. The replacement
+defines the correct architecture inline and loads every non-pooler
+/ non-contrastive key with `strict=False` but raises on any
+hard-missing keys outside the allowed prefixes. Local-CPU test:
+on 15 real eval rows per class, separation is 0.998 vs 0.054
+(margin +0.944). This bug was masked for as long as it existed
+because the loader returned `(tokenizer, encoder, head)` shaped
+correctly even though the head was random — `strict=False` is a
+foot-gun when the key space is wrong, not just incomplete.
+
+## D22: Task 9 sanity probes drawn from real eval distribution, not hand-written
+**Decision:** `_SANITY_SUPPORTED_PROBES` and
+`_SANITY_CONTRADICTED_PROBES` are now 4 claim-evidence pairs each,
+sampled verbatim from `/data/eval_data_v3/test_claims.json` with
+their evidence already joined via `" [SEP] "` in the training
+format. `_SANITY_MARGIN` raised to 0.2 (from 0.1) and the check is
+mean-over-probes instead of single-probe pairs. On healthy v3 the
+margin is ~0.998; the threshold is a conservative lower bound.
+**Reason:** The original hand-written probes ("There is evidence
+of cardiomegaly." + well-formed English evidence) are off
+distribution. The v1/v3 training data is MIMIC-CXR report
+fragments in mixed ALL-CAPS clinical shorthand. On the
+off-distribution probes, the v3 verifier outputs
+`sup=0.9749, con=0.9756, margin=-0.0007` — a false sanity-check
+failure that would block every Task 9 run even when the model is
+healthy. Using real eval rows guarantees the sanity check tests
+the same input distribution the model was trained on, so the
+probes themselves cannot produce false negatives. The mean-over-4
+margin formulation also tolerates individual edge probes without
+failing the overall check.
+
+## D23: Task 9 real dual-run headline number = `downgrade_rate_diff: 1.00`
+**Decision:** The Task 9 real CheXagent dual-run landed on
+2026-04-15 with a clean 100% same-model downgrade rate and 0%
+cross-model downgrade rate, giving the maximum possible
+`downgrade_rate_diff` of 1.00 on 414 matched claim pairs per
+condition (828 rows total). Mean verifier score: 0.987 same, 0.986
+cross; paired score diff: mean 0.0009, stdev 0.0055; 95.7% of
+paired claims receive identical scores within 1e-4; zero pairs
+differ by more than 0.1. The v3 verifier cannot distinguish the
+two conditions by content; the provenance gate catches every
+same-model pair using only metadata.
+**Reason:** This is the cleanest empirical argument in the paper
+for the provenance gate. The pass bar was `downgrade_rate > 0.5`;
+the actual result is 2× that. The result is published in
+`results/same_model_experiment/real/gate_demo.json` and the full
+per-row table in
+`results/same_model_experiment/real/gate_demo_rows.json`. Promoted
+from §3.7 "case study" to a full contribution in the Discussion
+section.

@@ -1,0 +1,43 @@
+{
+  "config": {
+    "verifier_checkpoint": "/data/checkpoints/verifier_binary_v3/best_verifier.pt",
+    "openi_images_dir": "/data/openi_images",
+    "openi_reports_csv": "/data/openi_cxr_chexpert_schema.csv",
+    "workbook_a_path": "/data/same_model_experiment/real/annotation_workbook_run_a.json",
+    "workbook_b_path": "/data/same_model_experiment/real/annotation_workbook_run_b.json",
+    "output_dir": "/data/same_model_experiment/real",
+    "max_images": 100,
+    "image_seed": 42,
+    "seed_run_a": 101,
+    "seed_run_b": 202,
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "high_score_threshold": 0.5,
+    "hf_backbone": "roberta-large",
+    "max_length": 256,
+    "batch_size": 16,
+    "skip_generation": true
+  },
+  "stats": {
+    "by_condition": {
+      "same_run": {
+        "n_claims": 414,
+        "n_high_score": 414,
+        "n_certified_pre_gate": 414,
+        "n_certified_post_gate": 0,
+        "downgrade_rate": 1.0
+      },
+      "cross_run": {
+        "n_claims": 414,
+        "n_high_score": 414,
+        "n_certified_pre_gate": 414,
+        "n_certified_post_gate": 414,
+        "downgrade_rate": 0.0
+      }
+    },
+    "downgrade_rate_diff": 1.0,
+    "n_rows_total": 828
+  },
+  "rows_path": "/data/same_model_experiment/real/gate_demo_rows.json",
+  "n_pairs": 828
+}

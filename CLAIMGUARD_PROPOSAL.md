@@ -625,24 +625,84 @@ no silver match / invalid user label / silver row with no valid grader
 columns) are surfaced in the output JSON so any upward-bias source is
 visible to reviewers.
 
-### V3.5 Provenance-gate same-model failure-mode case study (Task 9)
+### V3.5 Provenance-gate same-model failure-mode case study (Task 9) — **COMPLETED 2026-04-15**
 
 Empirically validates the existing provenance-aware trust-tier gate
-(`inference/provenance.py`, 36/36 tests) on a real scenario. Runs
-CheXagent twice over the **same 100 OpenI images** with distinct
-sampling seeds (runs A and B), pairs each run-A claim with run-A
-evidence (same-model) and run-B evidence (cross-model), and measures
-the downgrade rate under the gate.
+(`inference/provenance.py`, 36/36 tests) on a real scenario. Ran
+CheXagent (StanfordAIMI/CheXagent-8b) twice over the **same 100 OpenI
+images** with distinct sampling seeds (run A: seed 101, 414 claims;
+run B: seed 202, 401 claims), paired each run-A claim with run-A
+evidence (`SAME_MODEL`) and run-B evidence (`INDEPENDENT`), and
+measured the v3 verifier's supported-class score and the gate's
+post-gate label for each pair.
 
-Expected result: the verifier scores both pairings as "supported"
-because the claim and evidence come from the same distribution, but
-the gate downgrades the same-model pairs to `SUPPORTED_UNCERTIFIED`
-at a rate > 0.5 while certifying the cross-model pairs as
-`SUPPORTED_TRUSTED`. Novel and publishable — frame as a contribution,
-not a limitation. This is the first empirical demonstration that
-claim-level certification MUST track generator identity; a
-conformal FDR guarantee over self-agreeing evidence is
-epistemically hollow.
+**Headline result** (`results/same_model_experiment/real/gate_demo.json`,
+n = 414 matched pairs per condition, 828 rows total):
+
+| Condition | n | Mean verifier score | n_high_score | Certified pre-gate | Certified post-gate | **Downgrade rate** |
+|---|---:|---:|---:|---:|---:|---:|
+| Same-run (SAME_MODEL) | 414 | 0.987 | 414 / 414 | 414 / 414 | 0 / 414 | **1.00** |
+| Cross-run (INDEPENDENT) | 414 | 0.986 | 414 / 414 | 414 / 414 | 414 / 414 | **0.00** |
+| **Downgrade rate diff** | | | | | | **1.00** |
+
+Paired verifier-score statistics on 414 matched claims: mean
+difference 0.0009, stdev 0.0055, maximum |diff| 0.044, 95.7% of pairs
+identical within 1e-4, **zero** pairs differ by more than 0.1. The v3
+verifier **cannot distinguish** same-run from cross-run conditions.
+The provenance gate, using only metadata (`claim_generator_id`,
+`evidence_generator_id`, `evidence_source_type`), downgrades 100% of
+same-run claims to `supported_uncertified` while leaving 100% of
+cross-run claims as `supported_trusted`.
+
+**Why this matters** (paper framing, novel contribution):
+content-level claim verification is blind to self-consistency loops —
+when the same generator writes both the claim and its evidence, the
+verifier sees "two sentences that agree with each other" and reports
+high supported-probability. The provenance gate is the cheapest
+possible fix: zero content analysis, zero model weights touched, one
+metadata check, 100% downgrade rate on the failure mode. This is the
+first empirical demonstration in the literature (to our knowledge)
+that conformal FDR over self-agreeing evidence is epistemically
+hollow, and that provenance-aware gating is a necessary complement to
+content-level scoring.
+
+**Artifacts:**
+- Real CheXagent dual-run workbooks:
+  `/data/same_model_experiment/real/annotation_workbook_run_{a,b}.json`
+  on the `claimguard-data` volume
+- Per-row scored table:
+  `results/same_model_experiment/real/gate_demo_rows.json` (828 rows)
+- Aggregate stats:
+  `results/same_model_experiment/real/gate_demo.json`
+- Modal app: `claimguard-provenance-gate-demo`, functions
+  `demo_provenance_gate_remote` + `task9_orchestrator_remote` (deployed
+  2026-04-15)
+
+**Architectural fixes shipped with the real run (see `decisions.md`
+D20–D22):**
+- Bug 1: Modal image was missing `add_local_python_source("inference")`
+  so the container's module-level `from inference.provenance import …`
+  crashed at import with `ModuleNotFoundError`. Caught from app logs
+  after the orchestrator silently restarted three times.
+- Bug 2: `_load_v1_verifier` tried to load the checkpoint into a plain
+  `AutoModel + Linear(hidden, 2)` layout. The actual v1/v3 checkpoint
+  is the `VerifierModel` class (text_encoder + heatmap_encoder +
+  verdict_head Linear(1792, 256) → Linear(256, 2) + score_head +
+  contrastive_proj), so `strict=False` silently dropped the head
+  keys. `_sanity_check_verifier` caught this (sup probe 0.2063 vs con
+  probe 0.2029, margin 0.0034 vs required 0.1). Rewrote loader to
+  define the full `VerifierModel` class inline (matches
+  `scripts/modal_run_evaluation.py` lines 105–162), load
+  `model_state_dict` properly, and require all non-pooler /
+  non-contrastive keys to be present.
+- Bug 3: Hand-written sanity probes ("There is evidence of
+  cardiomegaly" / "The heart is normal in size") were off-distribution
+  vs the ALL-CAPS clinical-fragment training data. Replaced with 4
+  real eval rows per class sampled from `/data/eval_data_v3/
+  test_claims.json`. New mean margin on local test: 0.998 (vs prior
+  false-negative 0.0007). The sanity check now uses
+  `mean(P_sup | sup probes) - mean(P_sup | con probes) ≥ 0.2`
+  over 8 on-distribution probes.
 
 ### V3.6 Retrieval pipeline upgrade (Task 5)
 
