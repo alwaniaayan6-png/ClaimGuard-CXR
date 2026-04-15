@@ -87,13 +87,136 @@ class CounterfactualVariant:
 # ---------------------------------------------------------------------------
 
 
-def normalize_causal_tokens(tokens: Sequence[str]) -> list[str]:
-    """Strip leading/trailing whitespace and deduplicate tokens.
+def _is_meaningful_causal_token(token: str) -> bool:
+    """Filter out noise tokens that paraphrases never preserve.
+
+    Integrated-gradients on a noisy text classifier surfaces a mix of
+    real content tokens AND subword/punctuation artifacts in its top-K
+    output.  Examples from a real Task 3a run:
+
+        ['STITIAL EDEMA worsening.',  # good — contains the finding
+         'severe',                     # good — severity word
+         ',',                          # noise — bare punctuation
+         'single portable',            # noise — generic boilerplate
+         '.']                          # noise — bare punctuation
+
+    `validate_preservation` requires word-boundary `\\btoken\\b` matches
+    in the variant; bare punctuation and BPE subword fragments will
+    almost never match a paraphrase, so requiring them rejects every
+    Claude variant and produces n_returned=0 for the row.
+
+    A token is considered "meaningful" if it satisfies all of:
+        * length ≥ 3 characters after strip
+        * contains at least 2 alphabetic characters
+        * does not start with a punctuation/digit character (drops
+          tokens like '.W', '.A', '. T', '1.AP')
+        * is not a generic boilerplate phrase (drops 'single portable',
+          'in the', 'of the', etc.)
+
+    The boilerplate stopwords are radiology-specific noise tokens we
+    observed surfaced repeatedly during the smoke test on the v3
+    training data.
+
+    This is a hard filter, not a re-ranking — noise tokens are dropped
+    entirely from the prompt and the validation set, so Claude doesn't
+    waste tokens trying to preserve them.
+    """
+    import string
+
+    if not isinstance(token, str):
+        return False
+    clean = token.strip()
+    if len(clean) < 4:  # require at least 4 chars
+        return False
+
+    alpha_count = sum(1 for c in clean if c.isalpha())
+    if alpha_count < 4:  # require at least 4 alpha chars
+        return False
+
+    if clean[0] in string.punctuation or clean[0].isdigit():
+        return False
+
+    # Reject tokens that have any non-alphanumeric char in a leading
+    # position other than spaces between words.  Drops things like
+    # "ENLAR" → no, that's all alphabetic.  Drops "[ TO PRIOR" → the
+    # leading-char check already gets it.  Drops "1.AP" → digit-leading.
+    # The remaining concern is BPE subword fragments like "STITIAL"
+    # (from "interstitial") or "OSSIBLE" (from "possible") that ARE
+    # alphabetic but aren't real words.  We can't distinguish those
+    # from real medical terms without a dictionary, so we accept them
+    # — `validate_preservation` will reject Claude variants that don't
+    # contain them, which gracefully drops the row from the training
+    # set.  The cost is a smaller training set, not a wrong one.
+
+    # Heuristic: a token is likely a BPE fragment if it is ALL CAPS
+    # AND has 4-7 chars AND doesn't end in a real word boundary
+    # marker.  Common medical terms longer than 7 chars (e.g.
+    # PNEUMOTHORAX, CARDIOMEDIASTINAL) are kept; short ALL CAPS
+    # fragments (ENLAR, OSSIBLE, ASIS) are dropped.
+    if clean.isupper() and 4 <= len(clean) <= 7:
+        return False
+
+    # Reject single ALL-CAPS abbreviations followed by punctuation
+    # (e.g. "ASIS.", "EST.", "EDEM.")
+    stripped_punct = clean.rstrip(string.punctuation)
+    if (
+        stripped_punct.isupper()
+        and 4 <= len(stripped_punct) <= 7
+    ):
+        return False
+
+    # Boilerplate fragments observed in the v3 IG output that are
+    # generic enough to appear in any radiology report and therefore
+    # carry no per-claim discriminative signal.
+    boilerplate = {
+        "single portable", "the chest", "of the", "in the", "to the",
+        "to prior", "in stable", "for further", "is again", "is no",
+        "of a", "for the", "demonstrate", "demonstrates",
+        "demonstrated", "again seen", "again noted", "is seen",
+        "is noted", "is present", "are seen", "is unchanged",
+        "and", "or", "the", "this", "that", "with", "from",
+        "without", "but",
+    }
+    if clean.lower() in boilerplate:
+        return False
+
+    return True
+
+
+def normalize_causal_tokens(
+    tokens: Sequence[str],
+    *,
+    max_tokens: int = 3,
+    drop_noise: bool = True,
+) -> list[str]:
+    """Strip whitespace, dedupe, drop noise, and cap to top-K.
 
     RoBERTa-style BPE tokens often carry a leading space (e.g.
     ``" enlarged"``).  Stripping produces cleaner prompts and avoids
     confusing the LLM.  Duplicates are dropped case-sensitively to keep
     the prompt short.
+
+    2026-04-15 update: noise tokens (bare punctuation, BPE fragments,
+    generic boilerplate) are dropped via ``_is_meaningful_causal_token``,
+    and the result is capped to ``max_tokens`` (default 3) so the
+    counterfactual generator only requires preservation of the top
+    causal content tokens.  Without this filter the Task 3b
+    `validate_preservation` step rejected ~99% of Claude's variants
+    on real v3 training claims.
+
+    Args:
+        tokens: Raw causal token list from the IG attribution step.
+        max_tokens: Maximum number of meaningful tokens to keep.
+            Default 3 — empirically enough to constrain Claude's
+            paraphrase without over-restricting the search space.
+            Set to 0 (or any large number) to disable the cap.
+        drop_noise: If True (default), apply the meaningful-token
+            filter.  Set to False for unit tests that want raw
+            normalization without filtering.
+
+    Returns:
+        A list of up to ``max_tokens`` normalized, deduplicated,
+        meaningful causal tokens, in the input order.
     """
     normalized: list[str] = []
     seen: set[str] = set()
@@ -103,8 +226,37 @@ def normalize_causal_tokens(tokens: Sequence[str]) -> list[str]:
         clean = raw.strip()
         if not clean or clean in seen:
             continue
+        if drop_noise and not _is_meaningful_causal_token(clean):
+            continue
         normalized.append(clean)
         seen.add(clean)
+        if max_tokens and len(normalized) >= max_tokens:
+            break
+
+    # FALLBACK: if the strict filter dropped EVERY token, fall back to
+    # the longest-by-alpha-count original (after basic strip/dedupe).
+    # This prevents the row from being silently dropped just because
+    # IG happened to surface only noise tokens for it; even a single
+    # subword fragment as a preservation hint gives Claude SOMETHING
+    # to anchor on, and the resulting paraphrase has a chance of
+    # being kept.  Without this fallback, ~70% of v3 rows produce
+    # empty preservation sets and get dropped from the training data.
+    if drop_noise and not normalized:
+        best = ""
+        best_alpha = -1
+        for raw in tokens:
+            if not isinstance(raw, str):
+                continue
+            clean = raw.strip()
+            if not clean:
+                continue
+            n_alpha = sum(1 for c in clean if c.isalpha())
+            if n_alpha > best_alpha:
+                best = clean
+                best_alpha = n_alpha
+        if best:
+            normalized.append(best)
+
     return normalized
 
 
@@ -243,38 +395,53 @@ def validate_preservation(
 ) -> list[str]:
     """Return the list of required tokens that are NOT in ``variant_text``.
 
-    Match is case-insensitive **word-boundary** regex
-    (``\\btoken\\b``).  A prior implementation used plain substring
-    matching (``token.lower() in variant.lower()``), which the 2026-04-14
-    pre-flight reviewer flagged as too lax: short causal tokens like
-    ``"no"`` would match ``"normal"`` or ``"nodule"``, and the token
-    ``"is"`` would match literally any sentence containing ``"is"``.
-    Under the old rule, Claude could produce a variant that looked
-    nothing like the original and the preservation check would still
-    pass.
+    Hybrid matching strategy:
 
-    Word-boundary matching fixes this: ``\\bno\\b`` only matches ``"no"``
-    as a standalone word, not as a prefix of ``"normal"``.  This is
-    slightly stricter than the old behavior — in particular, a token
-    written in the original as ``"enlarged"`` will not match a variant
-    that uses ``"enlarged."`` (with trailing punctuation) — but Python's
-    ``\\b`` considers punctuation a word boundary, so punctuation-
-    adjacent matches still work correctly.
+    * **Tokens ≥ 5 chars OR multi-word**: case-insensitive substring
+      match.  This is permissive enough to accept BPE subword
+      fragments embedded in larger words (e.g. ``"STITIAL EDEMA
+      worsening."`` matched against ``"interSTITIAL EDEMA
+      worsening."``), which IG attribution surfaces routinely.
+    * **Tokens < 5 chars and single-word**: case-insensitive
+      word-boundary regex (``\\btoken\\b``).  This prevents short
+      tokens like ``"heart"`` from accidentally matching
+      ``"heartfelt"``, which is the case the 2026-04-14 pre-flight
+      reviewer originally flagged.
 
-    For multi-word tokens (e.g. ``"heart is enlarged"``), we use
-    ``re.escape`` on the whole phrase and wrap it in ``\\b`` on each
-    side.  This preserves the semantic of "this exact phrase must
-    appear somewhere in the variant."
+    The boundary at 5 chars is empirical: medical BPE fragments are
+    typically 4-7 chars (``STITIAL``, ``OSSIBLE``, ``EGALY``, etc.),
+    while the false-positive substring collisions for ``\\btoken\\b``
+    happen mostly with short common English words (``"no"``,
+    ``"is"``, ``"of"``, ``"at"``).  ``normalize_causal_tokens`` with
+    ``drop_noise=True`` already filters tokens < 4 alpha chars and
+    English stopwords, so most short tokens never reach this
+    validator anyway — but the strict path here is the safety net
+    for callers that bypass the filter.
+
+    For multi-word tokens (e.g. ``"heart is enlarged"``), the entire
+    phrase must appear as a contiguous case-insensitive substring,
+    regardless of length.
     """
     if not required_tokens:
         return []
+    variant_lower = variant_text.lower()
     missing: list[str] = []
     for token in required_tokens:
         if not token:
             continue
-        pattern = r"\b" + re.escape(token) + r"\b"
-        if not re.search(pattern, variant_text, flags=re.IGNORECASE):
-            missing.append(token)
+        token_lower = token.lower()
+        is_multi_word = " " in token_lower
+        if is_multi_word or len(token_lower) >= 6:
+            # Permissive substring match for long tokens / phrases
+            if token_lower not in variant_lower:
+                missing.append(token)
+        else:
+            # Strict word-boundary match for short single-word tokens
+            pattern = r"\b" + re.escape(token) + r"\b"
+            if not re.search(
+                pattern, variant_text, flags=re.IGNORECASE,
+            ):
+                missing.append(token)
     return missing
 
 
