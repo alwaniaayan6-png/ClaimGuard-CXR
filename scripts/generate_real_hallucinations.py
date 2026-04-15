@@ -75,8 +75,10 @@ app = modal.App("claimguard-real-hallucinations")
 
 gen_image = (
     modal.Image.debian_slim(python_version="3.11")
+    .apt_install("libgl1", "libglib2.0-0")  # cv2 runtime deps
     .pip_install(
         "torch>=2.1.0",
+        "torchvision>=0.16.0",  # CheXagent modeling imports torchvision
         # CheXagent's bundled modeling files call into transformers
         # internals that changed after 4.40. Pin exactly.
         "transformers==4.40.0",
@@ -87,6 +89,18 @@ gen_image = (
         "accelerate>=0.27.0",
         "sentencepiece>=0.1.99",
         "protobuf>=3.20.0",
+        # CheXagent's bundled configuration_chexagent.py requires all
+        # of the following at import time.  Discovered on the
+        # 2026-04-15 Task 9 launch when CheXagent silently fell
+        # through to the "[CheXagent unavailable]" stub path on every
+        # image because of these missing deps — the model loader
+        # prints the error but returns None, and the downstream
+        # workbook still contains 100 entries (all sentinel strings),
+        # which passes schema checks but produces meaningless pair
+        # tables for Task 9.
+        "einops>=0.7.0",
+        "albumentations>=1.3.1",
+        "opencv-python-headless>=4.8.0",  # "cv2" but without the GUI
     )
 )
 
