@@ -806,15 +806,19 @@ StratCP does not deliver it.
 
 **Method 3 — Forward cfBH (ConformalClaimTriage, `run_openi_recalibrated_eval.py`).**
 Implements the textbook forward cfBH direction (calibrate on
-*faithful* claims, upper-tail test, per-group BH). Returns
-**n_green = 0 at every α level**. The failure mode is a calibration
-granularity mismatch: after one-per-patient subsampling, 12 of 14
-CheXpert pathology groups fall below the 50-claim per-group
-threshold and get merged into a pooled "Rare/Other" group. The
-pooled-faithful calibration pool has only ~69 samples, so the
+*faithful* claims, upper-tail test, **per-group BH**, not global
+BH). Returns **n_green = 0 at every α level**. The failure mode is a
+calibration granularity mismatch: after one-per-patient subsampling,
+12 of 14 CheXpert pathology groups fall below the 50-claim
+per-group threshold and get merged into a pooled "Rare/Other" group.
+The pooled-faithful calibration pool has only ~69 samples, so the
 smallest achievable p-value is `1/70 = 0.014`, which exceeds the
-BH rank-1 threshold `α × 1/n_test = 0.05 × 1/900 = 5.6e-5` for any
-reasonable α.
+per-group BH rank-1 threshold `α × 1 / n_test_group = 0.05 × 1 / 315
+= 1.6e-4` for the pooled test group at α=0.05 (and remains orders of
+magnitude above the global-BH threshold `α × 1 / n_test = 0.05 / 900
+= 5.6e-5`). Both thresholds are smaller than 0.014 by >100×, so
+*every* reasonable BH variant — per-group or global — rejects
+nothing under the forward calibration direction on this data.
 
 **Why this matters** (paper contribution): the forward cfBH direction
 is brittle on small cross-dataset splits because both faithful-cal

@@ -285,12 +285,16 @@ FDR control: StratCP is certified to bound per-stratum miscoverage,
 and its empirical FDR blows past α at every level on OpenI, which
 is the expected behavior but is not suitable for a "green means
 safe" downstream use case.  Forward cfBH is the textbook direction
-(calibrate on faithful) implemented via `ConformalClaimTriage`; on
-v3 OpenI it returns n_green=0 at every α because after one-per-
-patient subsampling the faithful-calibration pool in the "Rare/Other"
-pooled group has only ~69 samples, so the smallest p-value (1/70 =
-0.014) exceeds the BH rank-1 threshold (5.6e-5 at α=0.05) — a
-pure calibration granularity failure. This is the cleanest empirical
+(calibrate on faithful) implemented via `ConformalClaimTriage` with
+**per-group BH**; on v3 OpenI it returns n_green=0 at every α
+because after one-per-patient subsampling the faithful-calibration
+pool in the "Rare/Other" pooled group has only ~69 samples, so the
+smallest p-value (1/70 = 0.014) exceeds both the per-group
+rank-1 BH threshold (α × 1/n_test_pooled = 0.05/315 = 1.6e-4 at
+α=0.05, where 315 is the pooled-group test-set size) and the
+hypothetical global-BH threshold (α × 1/n_test = 0.05/900 = 5.6e-5
+at α=0.05), by >100× in either case — a pure calibration
+granularity failure independent of which BH variant is applied. This is the cleanest empirical
 evidence we have for D1's inverted-calibration decision: the forward
 direction is not just suboptimal, it is brittle on small cross-
 dataset splits, and can collapse to zero rejections on realistic
