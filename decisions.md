@@ -260,3 +260,39 @@ per-row table in
 `results/same_model_experiment/real/gate_demo_rows.json`. Promoted
 from §3.7 "case study" to a full contribution in the Discussion
 section.
+
+## D24: Task 6 v3 OpenI transfer — inverted cfBH holds, forward cfBH collapses, StratCP overshoots
+**Decision:** Task 6's v3 OpenI recalibrated eval ships three
+methods as a direct head-to-head comparison in the paper: inverted
+cfBH (main), StratCP (miscoverage baseline), and forward cfBH
+(ConformalClaimTriage). The inverted cfBH is the paper's main
+result; the other two are explicit failure-mode comparisons.
+Numbers on v3 OpenI (n_test=900, patient-level 50/50 split):
+
+| α | inv_cfbh_FDR | inv_cfbh_n_green | stratcp_FDR | fwd_cfbh_n_green |
+|---|---|---|---|---|
+| 0.05 | 0.0088 | 113 | 0.1808 | 0 |
+| 0.10 | 0.0050 | 199 | 0.2778 | 0 |
+| 0.15 | 0.0050 | 201 | 0.3549 | 0 |
+| 0.20 | 0.0344 | 378 | 0.4006 | 0 |
+
+**Reason:** The v3 OpenI transfer is the paper's main cross-dataset
+claim. Inverted cfBH holds FDR at every α even though raw accuracy
+drops from 0.9877 to 0.7545 — exactly what conformal prediction
+promises. StratCP is included as the Zitnik-lab Feb 2026 baseline
+and demonstrates the distinction between miscoverage control and
+FDR control: StratCP is certified to bound per-stratum miscoverage,
+and its empirical FDR blows past α at every level on OpenI, which
+is the expected behavior but is not suitable for a "green means
+safe" downstream use case.  Forward cfBH is the textbook direction
+(calibrate on faithful) implemented via `ConformalClaimTriage`; on
+v3 OpenI it returns n_green=0 at every α because after one-per-
+patient subsampling the faithful-calibration pool in the "Rare/Other"
+pooled group has only ~69 samples, so the smallest p-value (1/70 =
+0.014) exceeds the BH rank-1 threshold (5.6e-5 at α=0.05) — a
+pure calibration granularity failure. This is the cleanest empirical
+evidence we have for D1's inverted-calibration decision: the forward
+direction is not just suboptimal, it is brittle on small cross-
+dataset splits, and can collapse to zero rejections on realistic
+data. We keep the forward run in the paper's Task 6 table as the
+"why inversion matters" row.

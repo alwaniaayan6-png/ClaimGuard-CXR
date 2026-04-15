@@ -1,0 +1,92 @@
+{
+  "task": "Task 6 \u2014 v3 OpenI recalibrated + StratCP comparison",
+  "verifier_checkpoint": "/data/checkpoints/verifier_binary_v3/best_verifier.pt",
+  "verifier_val_acc": 0.9877,
+  "openi_split": {
+    "n_total": 1784,
+    "n_cal": 884,
+    "n_test": 900,
+    "n_patients_cal": 536,
+    "n_patients_test": 537,
+    "split_seed": 42
+  },
+  "v3_openi_verifier_metrics": {
+    "accuracy": 0.7545,
+    "macro_f1": 0.7301,
+    "ece_raw": 0.1829,
+    "ece_calibrated": 0.0878,
+    "temperature": 1.9882
+  },
+  "headline_by_alpha": {
+    "alpha_0.05": {
+      "inverted_cfbh_fdr": 0.008849557522123894,
+      "inverted_cfbh_n_green": 113,
+      "inverted_cfbh_power": 0.09333333333333334,
+      "stratcp_fdr": 0.1807909604519774,
+      "stratcp_n_rejected": 177,
+      "forward_cfbh_n_green": 0
+    },
+    "alpha_0.1": {
+      "inverted_cfbh_fdr": 0.005025125628140704,
+      "inverted_cfbh_n_green": 199,
+      "inverted_cfbh_power": 0.165,
+      "stratcp_fdr": 0.2777777777777778,
+      "stratcp_n_rejected": 252,
+      "forward_cfbh_n_green": 0
+    },
+    "alpha_0.15": {
+      "inverted_cfbh_fdr": 0.004975124378109453,
+      "inverted_cfbh_n_green": 201,
+      "inverted_cfbh_power": 0.16666666666666666,
+      "stratcp_fdr": 0.35494880546075086,
+      "stratcp_n_rejected": 293,
+      "forward_cfbh_n_green": 0
+    },
+    "alpha_0.2": {
+      "inverted_cfbh_fdr": 0.03439153439153439,
+      "inverted_cfbh_n_green": 378,
+      "inverted_cfbh_power": 0.30416666666666664,
+      "stratcp_fdr": 0.4006024096385542,
+      "stratcp_n_rejected": 332,
+      "forward_cfbh_n_green": 0
+    }
+  },
+  "per_pathology_cfbh_alpha_0_05": {
+    "Atelectasis": {
+      "fdr": 1.0,
+      "n_green": 1,
+      "n_total": 108
+    },
+    "Consolidation": {
+      "fdr": 0.0,
+      "n_green": 1,
+      "n_total": 34
+    },
+    "Enlarged Cardiomediastinum": {
+      "fdr": 0.0,
+      "n_green": 3,
+      "n_total": 64
+    },
+    "No Finding": {
+      "fdr": 0.0,
+      "n_green": 72,
+      "n_total": 595
+    },
+    "Other": {
+      "fdr": 0.0,
+      "n_green": 34,
+      "n_total": 580
+    },
+    "Pneumothorax": {
+      "fdr": 0.0,
+      "n_green": 2,
+      "n_total": 24
+    }
+  },
+  "notes": [
+    "Inverted cfBH (the paper's main procedure, as implemented in scripts/modal_run_evaluation.py lines 419-524): FDR controlled at alpha at every tested level on OpenI v3 transfer.  Headline: FDR=0.0088/0.0050/0.0050/0.0344 at alpha=0.05/0.10/0.15/0.20 \u2014 holds cross-dataset with no retraining.",
+    "StratCP baseline: per-stratum miscoverage control, not FDR.  Empirical FDR on OpenI v3 transfer: 0.1808/0.2778/0.3549/0.4006 at alpha=0.05/0.10/0.15/0.20. FDR exceeds alpha at every level, which is expected: StratCP is certified to control per-stratum miscoverage, NOT BH-style FDR.  Implemented per medRxiv Feb 2026 algorithm description in inference/stratcp.py.",
+    "Forward cfBH (ConformalClaimTriage, Task 6's recalibrated script): n_green=0 at every alpha.  This is a calibration granularity failure: after one-per-patient subsampling the faithful calibration pool has only ~69 samples in the rare-pathology pooled group, so the smallest achievable p-value (1/70 = 0.014) exceeds the BH rank-1 threshold (alpha/n_test = 5.6e-5) for any reasonable alpha.  This is a direct empirical argument for the inverted-calibration design choice in D1: the forward calibration direction is brittle on small cross-dataset splits because both faithful cal and faithful test cluster at the softmax ceiling, while inverted calibration uses the wide contradicted distribution (scores near 0) and gives well-spread p-values.",
+    "v3 OpenI test accuracy: 0.7545 (down from 0.9877 on synthetic v3 test set).  FDR control transfers even though raw accuracy drops by 23 points \u2014 this is the central promise of conformal prediction, and it holds empirically on the cross-dataset transfer."
+  ]
+}

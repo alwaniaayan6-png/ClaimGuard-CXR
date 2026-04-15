@@ -1,0 +1,642 @@
+{
+  "config": {
+    "seed": 42,
+    "cal_fraction": 0.5,
+    "min_group_size": 50,
+    "alphas": [
+      0.05,
+      0.1,
+      0.15,
+      0.2
+    ],
+    "n_total_claims": 1784
+  },
+  "split": {
+    "n_cal": 884,
+    "n_test": 900,
+    "n_patients_cal": 536,
+    "n_patients_test": 537
+  },
+  "per_alpha": {
+    "0.05": {
+      "alpha": 0.05,
+      "global": {
+        "fdr": 0.0,
+        "power": 0.0,
+        "n_green": 0,
+        "n_total": 900,
+        "n_false_discoveries": 0,
+        "n_true_discoveries": 0,
+        "n_faithful": 608,
+        "n_contradicted": 292
+      },
+      "per_pathology": {
+        "Atelectasis": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 45,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 15,
+          "n_contradicted": 30
+        },
+        "Cardiomegaly": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 49,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 30,
+          "n_contradicted": 19
+        },
+        "Consolidation": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 21,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 9
+        },
+        "Edema": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 15,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 5
+        },
+        "Enlarged Cardiomediastinum": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 32,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 16,
+          "n_contradicted": 16
+        },
+        "Fracture": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 13,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 5,
+          "n_contradicted": 8
+        },
+        "Lung Lesion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 6,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 3,
+          "n_contradicted": 3
+        },
+        "Lung Opacity": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 20,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 8
+        },
+        "No Finding": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 297,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 249,
+          "n_contradicted": 48
+        },
+        "Other": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 288,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 208,
+          "n_contradicted": 80
+        },
+        "Pleural Effusion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 19,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 11,
+          "n_contradicted": 8
+        },
+        "Pneumonia": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 35,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 17,
+          "n_contradicted": 18
+        },
+        "Pneumothorax": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 14,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 4
+        },
+        "Support Devices": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 46,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 36
+        }
+      }
+    },
+    "0.1": {
+      "alpha": 0.1,
+      "global": {
+        "fdr": 0.0,
+        "power": 0.0,
+        "n_green": 0,
+        "n_total": 900,
+        "n_false_discoveries": 0,
+        "n_true_discoveries": 0,
+        "n_faithful": 608,
+        "n_contradicted": 292
+      },
+      "per_pathology": {
+        "Atelectasis": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 45,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 15,
+          "n_contradicted": 30
+        },
+        "Cardiomegaly": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 49,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 30,
+          "n_contradicted": 19
+        },
+        "Consolidation": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 21,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 9
+        },
+        "Edema": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 15,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 5
+        },
+        "Enlarged Cardiomediastinum": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 32,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 16,
+          "n_contradicted": 16
+        },
+        "Fracture": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 13,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 5,
+          "n_contradicted": 8
+        },
+        "Lung Lesion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 6,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 3,
+          "n_contradicted": 3
+        },
+        "Lung Opacity": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 20,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 8
+        },
+        "No Finding": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 297,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 249,
+          "n_contradicted": 48
+        },
+        "Other": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 288,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 208,
+          "n_contradicted": 80
+        },
+        "Pleural Effusion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 19,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 11,
+          "n_contradicted": 8
+        },
+        "Pneumonia": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 35,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 17,
+          "n_contradicted": 18
+        },
+        "Pneumothorax": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 14,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 4
+        },
+        "Support Devices": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 46,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 36
+        }
+      }
+    },
+    "0.15": {
+      "alpha": 0.15,
+      "global": {
+        "fdr": 0.0,
+        "power": 0.0,
+        "n_green": 0,
+        "n_total": 900,
+        "n_false_discoveries": 0,
+        "n_true_discoveries": 0,
+        "n_faithful": 608,
+        "n_contradicted": 292
+      },
+      "per_pathology": {
+        "Atelectasis": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 45,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 15,
+          "n_contradicted": 30
+        },
+        "Cardiomegaly": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 49,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 30,
+          "n_contradicted": 19
+        },
+        "Consolidation": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 21,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 9
+        },
+        "Edema": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 15,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 5
+        },
+        "Enlarged Cardiomediastinum": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 32,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 16,
+          "n_contradicted": 16
+        },
+        "Fracture": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 13,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 5,
+          "n_contradicted": 8
+        },
+        "Lung Lesion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 6,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 3,
+          "n_contradicted": 3
+        },
+        "Lung Opacity": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 20,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 8
+        },
+        "No Finding": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 297,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 249,
+          "n_contradicted": 48
+        },
+        "Other": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 288,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 208,
+          "n_contradicted": 80
+        },
+        "Pleural Effusion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 19,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 11,
+          "n_contradicted": 8
+        },
+        "Pneumonia": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 35,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 17,
+          "n_contradicted": 18
+        },
+        "Pneumothorax": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 14,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 4
+        },
+        "Support Devices": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 46,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 36
+        }
+      }
+    },
+    "0.2": {
+      "alpha": 0.2,
+      "global": {
+        "fdr": 0.0,
+        "power": 0.0,
+        "n_green": 0,
+        "n_total": 900,
+        "n_false_discoveries": 0,
+        "n_true_discoveries": 0,
+        "n_faithful": 608,
+        "n_contradicted": 292
+      },
+      "per_pathology": {
+        "Atelectasis": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 45,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 15,
+          "n_contradicted": 30
+        },
+        "Cardiomegaly": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 49,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 30,
+          "n_contradicted": 19
+        },
+        "Consolidation": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 21,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 9
+        },
+        "Edema": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 15,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 5
+        },
+        "Enlarged Cardiomediastinum": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 32,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 16,
+          "n_contradicted": 16
+        },
+        "Fracture": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 13,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 5,
+          "n_contradicted": 8
+        },
+        "Lung Lesion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 6,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 3,
+          "n_contradicted": 3
+        },
+        "Lung Opacity": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 20,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 12,
+          "n_contradicted": 8
+        },
+        "No Finding": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 297,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 249,
+          "n_contradicted": 48
+        },
+        "Other": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 288,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 208,
+          "n_contradicted": 80
+        },
+        "Pleural Effusion": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 19,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 11,
+          "n_contradicted": 8
+        },
+        "Pneumonia": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 35,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 17,
+          "n_contradicted": 18
+        },
+        "Pneumothorax": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 14,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 4
+        },
+        "Support Devices": {
+          "fdr": 0.0,
+          "power": 0.0,
+          "n_green": 0,
+          "n_total": 46,
+          "n_false_discoveries": 0,
+          "n_true_discoveries": 0,
+          "n_faithful": 10,
+          "n_contradicted": 36
+        }
+      }
+    }
+  }
+}
