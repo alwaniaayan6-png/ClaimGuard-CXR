@@ -5,8 +5,36 @@ Self-Improved" counterfactual pipeline.  Upstream, Task 3a identifies
 causal token spans (``data/augmentation/causal_term_identifier.py``),
 Task 3b generates counterfactual paraphrases (``counterfactual_generator.py``).
 This script takes a JSON file of ``{claim, evidence, counterfactual}``
-preference pairs and fine-tunes the v3 verifier into v4 using a DPO
-objective adapted for a binary classifier.
+preference pairs and fine-tunes the v3 verifier into v4.
+
+**KNOWN ISSUE (2026-04-14 pre-flight, blocks launch).**
+The DPO loss below uses ``chosen = counterfactual, rejected = original``.
+For a binary classifier where BOTH sides carry the same true label
+(contradicted), the naive DPO margin-maximization objective will pull
+the ORIGINAL claim's contradicted score DOWN to expand the margin
+between chosen and rejected, which is the opposite of what the plan
+wants — the goal is to make the verifier SAME-SCORE on original and
+counterfactual (consistency), not to prefer one over the other.
+
+The correct fix is one of:
+
+    (A) Replace the DPO loss with a consistency regularizer:
+        ``L = ||logit(y|C) - logit(y|C')||²``
+        This pulls the two scores toward each other without biasing
+        the absolute direction. Matches the Dually Self-Improved
+        paper's core intuition.
+
+    (B) Regenerate counterfactuals so that "rejected" is a TRUE
+        causal-breaking variant (one where the causal token IS
+        changed, producing the OPPOSITE verdict). Then the DPO pair
+        has different true labels and the margin-maximization is
+        correct. Requires rewriting Task 3b.
+
+Resolution required before launching Task 3.  Do not run
+``modal run --detach scripts/modal_train_dpo_refinement.py`` until
+one of (A) or (B) is implemented.  Until then, ship v3 (Task 2
+checkpoint) as the paper's v-current and document the Task 3 abort
+in the Limitations section.
 
 Why a custom DPO loss (not ``trl.DPOTrainer``)?
 -----------------------------------------------
@@ -15,16 +43,15 @@ computes log-probs over token-level logits.  Our v3 verifier is a
 RoBERTa-large cross-encoder classifier, so we reimplement the Rafailov
 et al. 2023 objective for a 2-class classifier:
 
-    chosen   = (counterfactual, evidence)  ← forces causal-token use
-    rejected = (original claim, evidence)  ← may use surface shortcuts
+    chosen   = (counterfactual, evidence)  ← preserves causal tokens
+    rejected = (original claim, evidence)  ← may carry surface shortcuts
 
     L_DPO = -E[log σ(β · (log π_θ(y|chosen) - log π_θ(y|rejected)
                           - log π_ref(y|chosen) + log π_ref(y|rejected)))]
 
 where y=1 is the contradicted class, π_θ is the trainable policy, and
-π_ref is a frozen copy of v3.  The intuition matches DPO exactly: push
-the policy's contradicted-class log-prob margin on chosen-over-rejected
-above the frozen reference's margin, scaled by β.
+π_ref is a frozen copy of v3.  **See KNOWN ISSUE above — this is the
+signature semantic concern that blocks launch.**
 
 Hyperparameters (from plan + Rafailov 2023)
 -------------------------------------------
@@ -586,14 +613,32 @@ def _run_training(config_json: str) -> dict[str, Any]:
             break
 
     # ---- Save checkpoint ----
+    # Reviewer-flagged (2026-04-14 pre-flight, BUG G): on abort the
+    # prior code still wrote ``best_verifier.pt``, which meant
+    # downstream eval pipelines would silently grab a diverged,
+    # aborted checkpoint as "v4".  We now write to a distinct
+    # filename on abort, drop a visible ``ABORTED`` marker file next
+    # to it, and only emit ``best_verifier.pt`` on a clean run.
     out_dir = Path(config.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = out_dir / "best_verifier.pt"
+    if stop_reason is None:
+        ckpt_path = out_dir / "best_verifier.pt"
+    else:
+        ckpt_path = out_dir / "aborted_verifier.pt"
+        marker_path = out_dir / "ABORTED"
+        with open(marker_path, "w", encoding="utf-8") as f:
+            f.write(
+                f"DPO training aborted at step {global_step}.\n"
+                f"Reason: {stop_reason}\n"
+                f"This checkpoint should NOT be used as v4. "
+                f"Ship v3 instead and document the abort in the paper.\n"
+            )
     torch.save(
         {
             "encoder": policy_encoder.state_dict(),
             "head": policy_head.state_dict(),
             "config": asdict(config),
+            "stop_reason": stop_reason,
         },
         str(ckpt_path),
     )

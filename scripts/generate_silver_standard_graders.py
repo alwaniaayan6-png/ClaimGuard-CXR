@@ -79,19 +79,30 @@ app = modal.App("claimguard-silver-graders")
 grader_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "torch>=2.1.0",
-        # Pin to match the CheXagent container so the same Modal image
-        # layer can host both jobs.
-        "transformers==4.40.0",
-        "numpy>=1.24.0",
-        "pandas>=2.0.0",
-        "Pillow>=10.0.0",
-        "tqdm>=4.66.0",
-        "accelerate>=0.27.0",
-        "sentencepiece>=0.1.99",
-        "protobuf>=3.20.0",
-        "anthropic>=0.25.0",
-        "requests>=2.31.0",
+        "torch==2.3.0",
+        # **Critical (2026-04-14 pre-flight fix):** the grader image
+        # is INTENTIONALLY on transformers 4.50.0, NOT 4.40.0.  The
+        # CheXagent generation step (in ``generate_real_hallucinations.py``)
+        # uses a separate Modal image pinned to 4.40.0 — the two
+        # containers do not share a layer, so the pins can diverge.
+        # MedGemma-4B-IT is ``Gemma3ForConditionalGeneration`` which
+        # first appeared in transformers 4.50 — on 4.40 the load
+        # silently falls through to text-only causal LM and the
+        # grader stamps all-UNCERTAIN.  4.50 is the floor that
+        # unblocks Grader 3.
+        "transformers==4.50.0",
+        "numpy==1.26.4",
+        "pandas==2.2.2",
+        "Pillow==10.3.0",
+        "tqdm==4.66.4",
+        "accelerate==0.30.1",
+        "sentencepiece==0.2.0",
+        "protobuf==5.27.1",
+        # Anthropic SDK pinned to 0.40.0 — known-good for the
+        # ``{"type": "image", "source": {"type": "base64", ...}}``
+        # vision block shape used in the Claude grader path.
+        "anthropic==0.40.0",
+        "requests==2.32.3",
     )
     # Anthropic API key is read from a Modal secret named "anthropic"
 )
@@ -427,43 +438,119 @@ def run_claude_grader(
         return
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        # max_retries at the SDK level gives us exponential backoff on
+        # 429 / 529 / connection errors for free.  Reviewer flag: the
+        # prior code had no retry and would silently stamp UNCERTAIN on
+        # every rate-limited call, collapsing the grader matrix.
+        client = anthropic.Anthropic(api_key=api_key, max_retries=5)
     except Exception as e:  # noqa: BLE001
         print(f"claude grader: client init failed ({e})")
         _stamp_abstain_claude(workbook)
         return
 
     import base64
+    import io
+    import time
 
     from tqdm import tqdm
 
     rows = workbook if max_claims is None else workbook[:max_claims]
-    # Per-image b64 cache — multiple claims share an image.
-    image_cache: dict[str, str] = {}
+    # Per-image b64 cache — multiple claims share an image.  Caches the
+    # POST-RESIZE bytes so re-encoding is amortized across claims.
+    image_cache: dict[str, tuple[str, str]] = {}  # path -> (b64, media_type)
 
-    def _get_b64(path: str) -> str | None:
+    def _load_resized_b64(
+        path: str,
+        *,
+        max_side: int = 1568,
+        jpeg_quality: int = 85,
+        max_bytes: int = 4_500_000,  # soft cap, Claude hard limit is 5 MB
+    ) -> tuple[str, str] | None:
+        """Load, resize, re-encode, and base64-encode an OpenI image.
+
+        Reviewer flag: the prior code read the raw file and base64-
+        encoded it directly.  OpenI PNGs can exceed 3.75 MB uncompressed,
+        and base64 inflates by ~33%, so the resulting payload could
+        cross Claude's 5 MB vision cap and trigger API errors.  The fix:
+
+        * Lazy-import PIL (only when the grader actually runs).
+        * Resize so the long side is ≤ ``max_side`` (1568 px — the
+          native resolution Claude's vision preprocessor targets).
+        * Re-encode as JPEG quality 85 (good enough for radiology
+          intensity patterns, massively smaller than PNG).
+        * Fall back to PNG if PIL can't convert (RGBA, etc.).
+        * Guard against the 5 MB cap — if the resized payload is
+          still too big, halve the long side and retry.
+
+        Returns ``(b64_string, media_type)`` or ``None`` on any
+        unrecoverable error.  The cached value is the resized bytes,
+        not the raw file, so memory pressure stays bounded.
+        """
         if path in image_cache:
             return image_cache[path]
         try:
-            with open(path, "rb") as f:
-                data = f.read()
+            from PIL import Image  # noqa: WPS433 lazy
+        except ImportError:
+            # Fall back to raw encoding if PIL isn't in the image.
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except Exception:  # noqa: BLE001
+                return None
             b64 = base64.b64encode(data).decode("utf-8")
-            image_cache[path] = b64
-            return b64
+            entry = (b64, _guess_media_type(path))
+            image_cache[path] = entry
+            return entry
+
+        try:
+            img = Image.open(path)
         except Exception:  # noqa: BLE001
             return None
+
+        # Convert grayscale / RGBA / P-mode to RGB for JPEG.
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        side = max_side
+        for _attempt in range(3):
+            w, h = img.size
+            long_side = max(w, h)
+            if long_side > side:
+                scale = side / long_side
+                new_size = (int(w * scale), int(h * scale))
+                resized = img.resize(new_size, Image.LANCZOS)
+            else:
+                resized = img
+            buf = io.BytesIO()
+            resized.save(buf, format="JPEG", quality=jpeg_quality)
+            blob = buf.getvalue()
+            if len(blob) <= max_bytes:
+                b64 = base64.b64encode(blob).decode("utf-8")
+                entry = (b64, "image/jpeg")
+                image_cache[path] = entry
+                return entry
+            side = side // 2  # halve and retry
+        # Still too big after 3 halvings (unlikely for X-rays) — drop.
+        return None
+
+    # Backwards-compatible wrapper used by the loop below.  Returns
+    # just the b64 string (media type is tracked separately).
+    def _get_b64(path: str) -> str | None:
+        entry = _load_resized_b64(path)
+        return entry[0] if entry else None
 
     for row in tqdm(rows, desc="Claude"):
         image_path = row.get("image_path", "")
         claim = row.get("extracted_claim", "")
         gt_report = row.get("ground_truth_report", "")
 
-        image_b64 = _get_b64(image_path)
-        if image_b64 is None:
+        entry = _load_resized_b64(image_path)
+        if entry is None:
             row["grader_claude_label"] = "UNCERTAIN"
             row["grader_claude_confidence"] = "low"
             row["grader_claude_rationale"] = "image unreadable"
             continue
+        image_b64, media_type = entry
 
         try:
             response = client.messages.create(
@@ -477,7 +564,7 @@ def run_claude_grader(
                                 "type": "image",
                                 "source": {
                                     "type": "base64",
-                                    "media_type": _guess_media_type(image_path),
+                                    "media_type": media_type,
                                     "data": image_b64,
                                 },
                             },
@@ -495,6 +582,45 @@ def run_claude_grader(
             )
             raw = response.content[0].text
             label, conf, rationale = parse_grader_json(raw)
+        except anthropic.RateLimitError as e:
+            # SDK's 5 retries already covered the transient-burst case;
+            # at this point we're genuinely rate-limited.  Sleep 30 s
+            # and retry once more before stamping UNCERTAIN.
+            time.sleep(30.0)
+            try:
+                response = client.messages.create(
+                    model=model_name,
+                    max_tokens=512,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": image_b64,
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        f"{GRADER_PROMPT}\n\n"
+                                        f"Original radiologist report:\n{gt_report}\n\n"
+                                        f"Claim to grade:\n{claim}"
+                                    ),
+                                },
+                            ],
+                        }
+                    ],
+                )
+                raw = response.content[0].text
+                label, conf, rationale = parse_grader_json(raw)
+            except Exception as e2:  # noqa: BLE001
+                label, conf, rationale = (
+                    "UNCERTAIN", "low", f"rate limit after retry: {e2}",
+                )
         except Exception as e:  # noqa: BLE001
             label, conf, rationale = "UNCERTAIN", "low", f"api error: {e}"
 
@@ -539,35 +665,75 @@ def run_medgemma_grader(
 
     Tries MedGemma-4B-IT first, then LLaVA-Med, then CXR-LLaVA.  If
     nothing loads, stamps UNCERTAIN.
+
+    **Loader class rotation (2026-04-14 pre-flight fix).**  MedGemma-4B-IT
+    is ``Gemma3ForConditionalGeneration`` — a vision-language model
+    whose correct HF loader is ``AutoModelForImageTextToText`` (added
+    in transformers 4.50).  The prior code used
+    ``AutoModelForCausalLM``, which on 4.50+ silently falls back to
+    the text-only causal head and discards the vision tower, so the
+    grader would see no image at all and stamp every row UNCERTAIN.
+
+    This loop now tries the image-text-to-text class FIRST (correct
+    for MedGemma-4B-IT and most modern radiology VLMs), then falls
+    back to ``AutoModelForVision2Seq`` (older LLaVA variants), then
+    ``AutoModelForCausalLM`` (legacy text-only path — last resort).
     """
     try:
         import torch
-        from transformers import AutoModelForCausalLM, AutoProcessor
+        from transformers import AutoProcessor
     except Exception as e:  # noqa: BLE001
         print(f"medgemma grader: torch/transformers import failed ({e})")
+        _stamp_abstain_medgemma(workbook)
+        return
+
+    # Loader classes tried in order of correctness.  Each one is
+    # imported lazily because older transformers versions may not
+    # export all three names.
+    def _load_loader_class(name: str):
+        try:
+            import transformers as _t
+            return getattr(_t, name, None)
+        except ImportError:
+            return None
+
+    loader_classes: list[tuple[str, object]] = []
+    for cls_name in (
+        "AutoModelForImageTextToText",
+        "AutoModelForVision2Seq",
+        "AutoModelForCausalLM",
+    ):
+        cls = _load_loader_class(cls_name)
+        if cls is not None:
+            loader_classes.append((cls_name, cls))
+    if not loader_classes:
+        print("medgemma grader: no usable loader class in transformers")
         _stamp_abstain_medgemma(workbook)
         return
 
     model, processor, tokenizer, model_id = None, None, None, None
     for cand in MEDGEMMA_CANDIDATES:
         print(f"medgemma grader: trying {cand}")
-        try:
-            model = AutoModelForCausalLM.from_pretrained(
-                cand,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-            processor = AutoProcessor.from_pretrained(
-                cand, trust_remote_code=True
-            )
-            tokenizer = getattr(processor, "tokenizer", None)
-            model_id = cand
-            print(f"medgemma grader: loaded {cand}")
+        for cls_name, cls in loader_classes:
+            try:
+                model = cls.from_pretrained(
+                    cand,
+                    torch_dtype=torch.bfloat16,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+                processor = AutoProcessor.from_pretrained(
+                    cand, trust_remote_code=True
+                )
+                tokenizer = getattr(processor, "tokenizer", None)
+                model_id = cand
+                print(f"medgemma grader: loaded {cand} via {cls_name}")
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  {cls_name} failed ({e})")
+                continue
+        if model is not None:
             break
-        except Exception as e:  # noqa: BLE001
-            print(f"  failed ({e})")
-            continue
 
     if model is None:
         _stamp_abstain_medgemma(workbook)

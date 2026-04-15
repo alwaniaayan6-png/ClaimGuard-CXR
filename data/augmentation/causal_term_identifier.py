@@ -392,13 +392,28 @@ class CausalTermIdentifier:
         # Sum across embedding dim → per-token scalar.
         per_token = attributions.sum(dim=-1)[0].detach().cpu().tolist()
 
-        # Determine the SEP index (first token with special_mask == 1
-        # that is not the [CLS]).  For RoBERTa the structure is
-        # <s> claim </s></s> evidence </s>.
+        # Determine the SEP index (first evidence-side token).  For
+        # RoBERTa the structure is ``<s> claim </s></s> evidence </s>``,
+        # so after the claim there are TWO contiguous special tokens
+        # (`</s>` and `</s>`) before the first evidence subword.  The
+        # 2026-04-14 pre-flight reviewer flagged that the prior code
+        # did ``sep_index = i + 1`` where ``i`` was the first
+        # special_mask==1 position after the CLS, which landed on the
+        # SECOND `</s>` (still a special token) rather than the first
+        # evidence subword.  That caused the first evidence token to
+        # be silently mislabeled as claim-side in
+        # ``split_tokens_by_sep``.
+        #
+        # The fix: after finding the first special position after CLS,
+        # advance past ALL contiguous special tokens so ``sep_index``
+        # points at the first real evidence subword.
         sep_index: Optional[int] = None
         for i in range(1, len(special_mask)):
             if special_mask[i] == 1:
-                sep_index = i + 1  # first evidence-side token
+                j = i + 1
+                while j < len(special_mask) and special_mask[j] == 1:
+                    j += 1
+                sep_index = j  # first non-special token after the SEP run
                 break
 
         sources = split_tokens_by_sep(special_mask, sep_index)

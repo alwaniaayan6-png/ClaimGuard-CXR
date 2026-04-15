@@ -227,6 +227,75 @@ class TestValidatePreservation(unittest.TestCase):
         )
         self.assertEqual(missing, ["left lower lobe"])
 
+    def test_word_boundary_no_does_not_match_normal(self) -> None:
+        """Reviewer-flagged regression (2026-04-14 pre-flight).
+
+        The prior substring implementation would accept a variant
+        that used 'normal' as a stand-in for the causal token 'no'
+        because 'no' is a substring of 'normal'. The word-boundary
+        regex fix rejects this — 'no' must appear as a standalone
+        word for preservation to count."""
+        missing = validate_preservation(
+            "the lungs appear normal",
+            ["no"],
+        )
+        self.assertEqual(missing, ["no"])
+
+    def test_word_boundary_no_does_not_match_nodule(self) -> None:
+        missing = validate_preservation(
+            "a pulmonary nodule is seen",
+            ["no"],
+        )
+        self.assertEqual(missing, ["no"])
+
+    def test_word_boundary_no_matches_standalone(self) -> None:
+        """Standalone 'no' as a whole word must still count."""
+        missing = validate_preservation(
+            "there is no pneumothorax",
+            ["no"],
+        )
+        self.assertEqual(missing, [])
+
+    def test_word_boundary_is_does_not_match_visualized(self) -> None:
+        """The short token 'is' must not match as a substring of
+        'visualized' / 'misdiagnosis' / etc."""
+        missing = validate_preservation(
+            "the heart is visualized clearly",
+            ["is"],
+        )
+        # "is" appears as a standalone word, so preservation holds.
+        self.assertEqual(missing, [])
+        # But a variant without standalone "is" should fail.
+        missing = validate_preservation(
+            "the heart visualized clearly",
+            ["is"],
+        )
+        self.assertEqual(missing, ["is"])
+
+    def test_word_boundary_heart_does_not_match_heartfelt(self) -> None:
+        """'heart' must not match 'heartfelt' / 'hearten' / etc."""
+        missing = validate_preservation(
+            "a heartfelt concern about the patient",
+            ["heart"],
+        )
+        self.assertEqual(missing, ["heart"])
+
+    def test_word_boundary_with_punctuation_still_matches(self) -> None:
+        """Punctuation adjacent to the token counts as a word
+        boundary, so 'heart.' / 'heart,' / '(heart)' all preserve
+        the token 'heart'."""
+        for variant in (
+            "the heart.",
+            "the heart, is enlarged",
+            "(heart)",
+            "the heart; is enlarged",
+        ):
+            missing = validate_preservation(variant, ["heart"])
+            self.assertEqual(
+                missing, [],
+                f"expected 'heart' preserved in {variant!r}",
+            )
+
 
 # ---------------------------------------------------------------------------
 # levenshtein_distance

@@ -243,21 +243,37 @@ def validate_preservation(
 ) -> list[str]:
     """Return the list of required tokens that are NOT in ``variant_text``.
 
-    Match is case-insensitive substring (``token.lower() in
-    variant.lower()``).  This is slightly more forgiving than exact
-    case matching, which we found too brittle against Claude's
-    capitalization choices.  The trade-off — "heart" matches
-    "heartfelt" — is acceptable in radiology where the causal-token
-    vocabulary rarely overlaps with unrelated stems.
+    Match is case-insensitive **word-boundary** regex
+    (``\\btoken\\b``).  A prior implementation used plain substring
+    matching (``token.lower() in variant.lower()``), which the 2026-04-14
+    pre-flight reviewer flagged as too lax: short causal tokens like
+    ``"no"`` would match ``"normal"`` or ``"nodule"``, and the token
+    ``"is"`` would match literally any sentence containing ``"is"``.
+    Under the old rule, Claude could produce a variant that looked
+    nothing like the original and the preservation check would still
+    pass.
+
+    Word-boundary matching fixes this: ``\\bno\\b`` only matches ``"no"``
+    as a standalone word, not as a prefix of ``"normal"``.  This is
+    slightly stricter than the old behavior — in particular, a token
+    written in the original as ``"enlarged"`` will not match a variant
+    that uses ``"enlarged."`` (with trailing punctuation) — but Python's
+    ``\\b`` considers punctuation a word boundary, so punctuation-
+    adjacent matches still work correctly.
+
+    For multi-word tokens (e.g. ``"heart is enlarged"``), we use
+    ``re.escape`` on the whole phrase and wrap it in ``\\b`` on each
+    side.  This preserves the semantic of "this exact phrase must
+    appear somewhere in the variant."
     """
     if not required_tokens:
         return []
-    variant_lower = variant_text.lower()
     missing: list[str] = []
     for token in required_tokens:
         if not token:
             continue
-        if token.lower() not in variant_lower:
+        pattern = r"\b" + re.escape(token) + r"\b"
+        if not re.search(pattern, variant_text, flags=re.IGNORECASE):
             missing.append(token)
     return missing
 

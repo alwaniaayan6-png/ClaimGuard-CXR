@@ -17,7 +17,16 @@ The binary framing:
   - Scores spread naturally across [0, 1]
   - Binary AUC on the frozen 3-class model was already 0.9933
 
-Checkpoint saved to /data/checkpoints/verifier_binary/best_verifier.pt
+Checkpoint paths:
+  - v1 (original): /data/checkpoints/verifier_binary/best_verifier.pt
+  - v2 (taxonomy fix): /data/checkpoints/verifier_binary_v2/best_verifier.pt
+  - v3 (12-type taxonomy, default): /data/checkpoints/verifier_binary_v3/best_verifier.pt
+
+Reproducibility note (2026-04-14 pre-flight fix):
+  The pip_install list pins EXACT versions via `==` for the reproducibility-
+  critical libraries.  A prior version used `>=` which let Modal resolve to
+  whatever PyPI served at container build time, meaning v1 and v3 runs
+  could disagree at the 3rd decimal purely from transformers API drift.
 """
 
 from __future__ import annotations
@@ -27,22 +36,26 @@ import modal
 # Define the Modal app and container image
 app = modal.App("claimguard-verifier-binary")
 
-# Container image with all dependencies
+# Container image with all dependencies.  Exact pins below lock the
+# v3 training run to the same library versions as the v1 image, so
+# the v1-vs-v3 comparison is clean (any decimal-place drift is the
+# taxonomy change, not torch/transformers upgrades).  Bump these
+# deliberately when the next verifier version needs a newer stack.
 verifier_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "torch>=2.1.0",
-        "transformers>=4.40.0",
-        "accelerate>=0.27.0",
-        "datasets>=2.18.0",
-        "pandas>=2.0.0",
-        "numpy>=1.24.0",
-        "scikit-learn>=1.3.0",
-        "scipy>=1.11.0",
-        "tqdm>=4.66.0",
-        "pyyaml>=6.0.1",
-        "tiktoken>=0.7.0",
-        "sentencepiece>=0.1.99",
+        "torch==2.3.0",
+        "transformers==4.40.0",
+        "accelerate==0.30.1",
+        "datasets==2.19.1",
+        "pandas==2.2.2",
+        "numpy==1.26.4",
+        "scikit-learn==1.5.0",
+        "scipy==1.13.1",
+        "tqdm==4.66.4",
+        "pyyaml==6.0.1",
+        "tiktoken==0.7.0",
+        "sentencepiece==0.2.0",
     )
 )
 

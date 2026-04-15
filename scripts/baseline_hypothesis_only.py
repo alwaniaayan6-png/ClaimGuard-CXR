@@ -1,23 +1,43 @@
-"""Hypothesis-only baseline for ClaimGuard-CXR v2 artifact analysis.
+"""Hypothesis-only baseline for ClaimGuard-CXR artifact analysis.
 
-Tests whether the verifier's 98% accuracy comes from genuine evidence
+Tests whether the verifier's accuracy comes from genuine evidence
 reasoning or from surface shortcuts in synthetic perturbations.
 
-Method: Train a DeBERTa-v3-large verifier on the SAME 30K training data,
-but with evidence passages replaced by padding. If this "claim-only"
-model achieves significantly above 66% (majority class), the perturbations
-contain exploitable lexical cues.
+Method: Train a RoBERTa-large verifier on the SAME training data as
+v1 / v3 but with evidence passages REPLACED by a single pad token. If
+this "claim-with-masked-evidence" model achieves significantly above
+66% (majority class), the perturbations contain exploitable lexical
+cues.
 
-Expected outcome:
-  - 70-80%: Some perturbations (negation, laterality) ARE detectable from
-    the claim alone — this is VALID signal, not an artifact
+**Critical methodology note (2026-04-14 pre-flight reviewer fix).**
+A prior version of this script tokenized the claim alone with
+``max_length=128``, while the v1/v3 verifier tokenizes
+``(claim, evidence)`` as a pair with ``max_length=512``.  That is
+NOT a hypothesis-only baseline — it's a different architecture and
+different input shape, and the resulting number is not directly
+comparable to the v1 verifier's accuracy.  The fix: this script now
+tokenizes ``(claim, "[PAD]")`` as a pair with ``max_length=512``,
+matching the v1/v3 input shape exactly.  The "[PAD]" evidence string
+is a single whitespace-only token that the tokenizer expands into
+attention-mask-zero positions — the model literally cannot read the
+evidence, but the input shape is identical to the real verifier.
+
+Expected outcome (calibrate against v1's 97.71% pre-sprint number):
+  - 70-80%: Some perturbations (negation, laterality) ARE detectable
+    from the claim alone — this is VALID signal, not an artifact
   - >90%: Task too easy, perturbations have severe surface shortcuts
   - <75%: Strong evidence that the verifier genuinely uses evidence
 
+v3 retrain target: the HO gap should be the difference between v3
+verifier accuracy and this HO accuracy.  The pre-sprint v1 gap was
+0.60 pp (98.31% - 97.71%).  Task 2 + Task 3 aim to grow this to ≥ 5 pp.
+
 Reference: Herlihy & Rudinger (ACL 2021) — hypothesis-only baselines for MedNLI
 
-Usage:
-    modal run --detach scripts/baseline_hypothesis_only.py
+Usage (v3 retrain):
+    modal run --detach scripts/baseline_hypothesis_only.py \\
+        --data-path /data/verifier_training_data_v3.json \\
+        --output-dir /data/checkpoints/hypothesis_only_v3
 """
 
 from __future__ import annotations
@@ -48,17 +68,34 @@ vol = modal.Volume.from_name("claimguard-data", create_if_missing=True)
     volumes={"/data": vol},
 )
 def train_hypothesis_only(
-    data_path: str = "/data/verifier_training_data.json",
-    output_dir: str = "/data/checkpoints/hypothesis_only",
-    model_name: str = "microsoft/deberta-v3-large",
-    learning_rate: float = 1e-5,
-    batch_size: int = 16,
-    gradient_accumulation: int = 4,
+    data_path: str = "/data/verifier_training_data_v3.json",
+    output_dir: str = "/data/checkpoints/hypothesis_only_v3",
+    model_name: str = "roberta-large",
+    learning_rate: float = 2e-5,
+    batch_size: int = 32,
+    gradient_accumulation: int = 2,
     num_epochs: int = 3,
-    max_length: int = 128,  # Claims only — much shorter than 512
+    max_length: int = 512,  # Match v1/v3 verifier input shape exactly
     seed: int = 42,
 ) -> dict:
-    """Train claim-only verifier (no evidence) to test for surface shortcuts."""
+    """Train masked-evidence verifier to test for surface shortcuts.
+
+    Architectural constraint (2026-04-14 pre-flight fix): this baseline
+    MUST use the same model architecture, same tokenization shape, and
+    same max_length as the v1/v3 verifier it is being compared to.
+    The prior version used DeBERTa-v3-large with claim-only tokenization
+    at max_length=128 — which is a DIFFERENT architecture and a
+    DIFFERENT input format, so the resulting "97.71%" number was never
+    a true hypothesis-only baseline.
+
+    Defaults updated:
+      * model_name: roberta-large (matches v1/v3)
+      * max_length: 512 (matches v1/v3)
+      * learning_rate: 2e-5 (matches v1/v3 trainer)
+      * batch_size: 32 × grad_accum 2 (matches v1/v3 effective batch 64)
+      * data_path: /data/verifier_training_data_v3.json (v3 taxonomy)
+      * output_dir: /data/checkpoints/hypothesis_only_v3 (no v1 overwrite)
+    """
     import json
     import os
     import random
@@ -90,12 +127,31 @@ def train_hypothesis_only(
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    # Masked evidence sentinel.  This is a single non-trivial token
+    # that is passed as the second sequence to the tokenizer so the
+    # (claim, evidence) pair shape matches v1/v3 exactly, but carries
+    # no information the model could exploit.  We deliberately avoid
+    # passing the empty string because some HF tokenizers collapse
+    # empty second sequences to single-sequence layout, which would
+    # DEFEAT the purpose of this baseline.
+    MASKED_EVIDENCE = tokenizer.pad_token or "[PAD]"
+
     class HypothesisOnlyDataset(Dataset):
-        """Dataset that provides ONLY the claim text, no evidence."""
-        def __init__(self, data, tokenizer, max_length):
+        """Dataset that masks evidence to a single pad token.
+
+        The claim is preserved verbatim; the evidence position is
+        replaced by a single pad token.  Tokenization is
+        ``(claim, "[PAD]")`` as a PAIR — same shape as v1/v3 —
+        truncated to max_length=512.  The model sees the full claim
+        structure and a single-token evidence field; any accuracy
+        above majority-class (~66%) must come from claim-side lexical
+        shortcuts."""
+
+        def __init__(self, data, tokenizer, max_length, masked_evidence):
             self.data = data
             self.tokenizer = tokenizer
             self.max_length = max_length
+            self.masked_evidence = masked_evidence
 
         def __len__(self):
             return len(self.data)
@@ -103,15 +159,15 @@ def train_hypothesis_only(
         def __getitem__(self, idx):
             item = self.data[idx]
             claim = item["claim"]
-            # KEY DIFFERENCE: No evidence! Just the claim.
             orig_label = item["label"]
             label = 1 if orig_label == 1 else 0
 
             encoding = self.tokenizer(
                 claim,
+                self.masked_evidence,  # PAIR shape, matches v1/v3 verifier
                 max_length=self.max_length,
                 padding="max_length",
-                truncation=True,
+                truncation="only_first",
                 return_tensors="pt",
             )
             return {
@@ -132,8 +188,12 @@ def train_hypothesis_only(
               if str(item.get("patient_id", f"_idx{i}")) in val_patients]
     print(f"Split: {len(train_ex)} train, {len(val_ex)} val")
 
-    train_ds = HypothesisOnlyDataset(train_ex, tokenizer, max_length)
-    val_ds = HypothesisOnlyDataset(val_ex, tokenizer, max_length)
+    train_ds = HypothesisOnlyDataset(
+        train_ex, tokenizer, max_length, MASKED_EVIDENCE,
+    )
+    val_ds = HypothesisOnlyDataset(
+        val_ex, tokenizer, max_length, MASKED_EVIDENCE,
+    )
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=2, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
@@ -266,6 +326,27 @@ def _interpret_accuracy(acc: float) -> str:
 
 
 @app.local_entrypoint()
-def main():
-    result = train_hypothesis_only.remote()
+def main(
+    data_path: str = "/data/verifier_training_data_v3.json",
+    output_dir: str = "/data/checkpoints/hypothesis_only_v3",
+    model_name: str = "roberta-large",
+    num_epochs: int = 3,
+    max_length: int = 512,
+    seed: int = 42,
+):
+    """Run the masked-evidence baseline with CLI-overridable paths.
+
+    Default targets the v3 training data + v3 output dir so an
+    accidental invocation does NOT overwrite the v1 HO checkpoint.
+    Override with ``--data-path /data/verifier_training_data.json``
+    to re-measure the v1 HO baseline under the fixed methodology.
+    """
+    result = train_hypothesis_only.remote(
+        data_path=data_path,
+        output_dir=output_dir,
+        model_name=model_name,
+        num_epochs=num_epochs,
+        max_length=max_length,
+        seed=seed,
+    )
     print(f"\nFinal result: {result}")
