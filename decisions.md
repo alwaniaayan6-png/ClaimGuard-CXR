@@ -300,3 +300,108 @@ direction is not just suboptimal, it is brittle on small cross-
 dataset splits, and can collapse to zero rejections on realistic
 data. We keep the forward run in the paper's Task 6 table as the
 "why inversion matters" row.
+
+## D25: Task 3a IG identification capped at 5000 contradicted claims, not 30000
+**Decision:** `scripts/run_causal_term_identification.py` is invoked
+with `--max-claims 5000` against the v3 contradicted training pool
+(of ~12000 contradicted claims in the 30000-row v3 training data).
+Output written to `/data/causal_spans_v3.jsonl` on the `claimguard-data`
+volume.
+**Reason:** Task 3b counterfactual generation is the cost bottleneck,
+not Task 3a.  At Sonnet 4.5 prices (~$0.0017/call), running Claude
+on 30000 × 3 variants = 90000 calls would cost ~$153 — blowing the
+plan's entire $43 Task 3 budget on a single sub-stage.  Capping at
+5000 claims keeps Task 3b at ~$25 (15000 calls), leaves headroom
+for the Task 3c training itself, and still produces ~12000 usable
+preference pairs after the Task 3b filter (96% smoke success rate).
+12000 pairs is well above the floor needed for a single-epoch R-Drop
+refinement on a 357M-parameter VerifierModel.
+
+The smoke-measured H100 rate was 0.3 sec/claim, which would have
+allowed 30000 in ~2.5 hours for $5.  IG attribution is cheap; the
+constraint is downstream Claude API cost, not GPU.
+
+## D26: Task 3b counterfactual filter — meaningful tokens + hybrid substring match
+**Decision:** `data.augmentation.counterfactual_generator.normalize_causal_tokens`
+filters input causal tokens through `_is_meaningful_causal_token`
+before they reach `validate_preservation`.  Filter criteria: ≥4 chars,
+≥4 alphabetic chars, no leading punctuation/digit, not an ALL-CAPS
+short fragment (4-7 chars), not a medical-boilerplate stopword
+("single portable", "in the", "demonstrates", etc.), and capped to
+top-3 meaningful tokens.  If the strict filter drops every token,
+fall back to the longest-by-alpha-count original.
+
+`validate_preservation` uses a hybrid match strategy: tokens ≥6
+chars OR multi-word phrases get case-insensitive **substring** match;
+tokens <6 chars and single-word get case-insensitive **word-boundary**
+regex.
+
+**Reason:** Empirical failure caught during the first Task 3b
+production launch on real v3 IG output: 99% of rows produced
+n_returned=0 because `validate_preservation` was rejecting all of
+Claude's variants.  Two distinct root causes:
+
+(1) IG attribution surfaces a mix of real causal content tokens AND
+subword/punctuation artifacts in its top-K output.  Example from
+v3_train_000000: `['STITIAL EDEMA worsening.', 'severe', ',',
+'single portable', '.']`.  Requiring preservation of ALL 5 tokens
+means the bare comma and period kill the row.
+
+(2) `validate_preservation` used `\btoken\b` word-boundary regex.
+When IG surfaces a BPE subword fragment like `"STITIAL"` (from
+`"INTERSTITIAL"`) and Claude correctly produces a paraphrase
+containing `"interSTITIAL EDEMA worsening."`, the word-boundary
+check refuses the match because there's no boundary between `"r"`
+and `"S"` inside `"interSTITIAL"`.
+
+Empirical validation on 50 real v3 contradicted claims:
+* Filter v0 (no fixes):              1/50 = 2% kept
+* Filter v1 (meaningful filter):     16/50 = 32% kept
+* Filter v2 (+ longest fallback):    16/50 = 32% kept (fallback
+                                     didn't help on its own)
+* Filter v3 (+ hybrid match):        48/50 = **96% kept**
+
+The 6-char threshold for substring vs word-boundary is empirical:
+medical BPE fragments are typically 4-7 chars (`STITIAL`, `OSSIBLE`,
+`EGALY`), while the worry case `"heart"` matching `"heartfelt"` is
+5 chars and stays on the word-boundary path.  The 60/60 unit tests
+pass under this rule, including the regression test for the
+heart/heartfelt false positive.
+
+## D27: Task 1 silver standard — drop CheXbert text-only labeler from grader ensemble
+**Decision:** The Task 1 silver-standard 3-grader ensemble is
+retired in favor of a 2-grader pipeline (Claude Sonnet 4.5 vision +
+self-annotation by the user, n=100 stratified subset).  The
+rule-based CheXbert text-only labeler is moved to a separate
+"report-coverage" diagnostic role and is no longer counted as a
+silver-standard grader.  MedGemma is dropped entirely (gated repo +
+broken fallback chain).
+
+**Reason:** Empirical disagreement on the 414-claim Task 1 v3 run.
+Krippendorff α between CheXbert and Claude Sonnet 4.5 vision was
+**0.08** across 3 fallback rungs (full 5-class ordinal, drop
+UNCERTAIN, binary coarsen), with the disagreement driven by 63
+cases (15% of all claims) in which CheXbert flagged
+`NOVEL_HALLUCINATED` and Claude flagged `SUPPORTED`.
+
+The pattern is consistent: CheXbert is a TEXT-ONLY rule-based
+labeler.  It sees a CheXagent claim about a pathology that isn't
+in the original radiologist *report* and stamps `NOVEL_HALLUCINATED`.
+But Claude has *image* vision and sees the pathology in the actual
+chest X-ray, so it (correctly) stamps `SUPPORTED`.  This isn't a
+methodology failure — it's an empirical measurement of how much the
+OpenI radiologist reports under-describe what's visible in the
+image.  The reframe: text-only graders are fundamentally
+inappropriate for image-grounded hallucination evaluation, and the
+field should retire them in favor of vision-language graders.  This
+becomes a methodological finding for the paper, filed alongside the
+retired-CheXbert decision in §3.6.
+
+The MedGemma path is dropped because all three fallback models
+failed in the live Modal run: `google/medgemma-4b-it` is gated,
+`microsoft/llava-med-v1.5-mistral-7b` has a `llava_mistral` model
+type that transformers 4.50 doesn't recognize, and
+`StanfordAIMI/CXR-LLAVA-v2` doesn't exist as a HuggingFace
+identifier.  Replacing the third grader with a different model is
+deferred to a future session; the Task 8 self-annotation pass
+serves as the second coder for the final α computation.
