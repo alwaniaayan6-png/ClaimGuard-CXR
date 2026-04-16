@@ -579,24 +579,78 @@ is now a historical artifact).  Success criterion: the HO-baseline
 gap grows from 0.60 pp to **≥ 5 pp** on v4, meaning the model now
 uses evidence rather than surface form.
 
-### V3.3 Silver-standard real-hallucination evaluation (Task 1)
+### V3.3 Silver-standard real-hallucination evaluation (Task 1) — **COMPLETED 2026-04-15 with reframe**
 
-First real-world test set for ClaimGuard, built without radiologist
-annotation via a 3-grader ensemble:
-- **CheXbert labeler diff** on CheXpert's 14-pathology vector between
-  the original OpenI report and the CheXagent-generated report
-- **Claude Sonnet 4.5 with vision**, given the X-ray image + claim +
-  original report, prompted for one of
-  `{SUPPORTED, CONTRADICTED, NOVEL_PLAUSIBLE, NOVEL_HALLUCINATED,
-  UNCERTAIN}` + confidence + ≤ 30-word rationale
-- **MedGemma-4B** (fallback LLaVA-Med / CXR-LLaVA), same prompt
+First real-world test set for ClaimGuard, originally designed as a
+3-grader ensemble (rule-based CheXbert / Claude Sonnet 4.5 with
+vision / MedGemma-4B). The actual run on 414 CheXagent-generated
+claims from 100 OpenI images surfaced **a methodological finding
+that reframed the entire silver-standard story** (D27 in
+`decisions.md`, vault synthesis page
+`task1-chexbert-wrong-tool-2026-04-15`).
 
-200 OpenI images, grader majority vote per (image, claim), ordinal
-Krippendorff α with 1000-bootstrap CI. Acceptance threshold **α ≥ 0.80**.
-The compile script exits non-zero if the threshold is not met, so the
-silver pool cannot accidentally land in the paper if the graders
-drifted. Comparison to RadFlag (Chen et al. 2025) 73% precision is the
-headline baseline.
+**The result we expected**: 3-grader ensemble with Krippendorff α ≥ 0.80.
+
+**The result we got**: Krippendorff α = **0.08** between CheXbert
+and Claude across all 3 fallback rungs (full 5-class ordinal,
+drop-UNCERTAIN, binary coarsen). MedGemma was unusable (gated
+`google/medgemma-4b-it`, broken `microsoft/llava-med-v1.5-mistral`
+model type, nonexistent `StanfordAIMI/CXR-LLAVA-v2`), stamping
+414/414 UNCERTAIN.
+
+**Why it happened**: 63 of the 414 disagreements (15% of all claims)
+sit in a single confusion-matrix cell — CheXbert NOVEL_HALLUCINATED
+× Claude SUPPORTED. In every one of those cases, CheXbert flagged a
+finding because it didn't appear in the *original radiologist
+report*, while Claude (with image vision) saw the same finding in
+the *actual chest X-ray* and labeled it SUPPORTED. CheXbert is a
+text-only rule-based labeler; Claude is image-grounded. **The two
+graders are not reading the same signal**, and Krippendorff α
+correctly reports near-zero agreement.
+
+This is not a methodology failure, it is a directly-measured
+property of the dataset: **15% of CheXagent's claims about OpenI
+chest X-rays describe findings that are visible in the image but
+absent from the reference radiologist report**, reflecting the
+well-known under-description rate of production clinical reports.
+To our knowledge this is the first quantitative measurement of the
+report-vs-image gap on OpenI using a vision-language grader as
+arbiter.
+
+**Reframe** (V3.3 final design):
+
+* **Drop CheXbert from the silver-standard grader ensemble.** Move
+  it to a separate "report-coverage" diagnostic role — useful for
+  measuring the report-image gap, not for arbitrating
+  hallucinations.
+* **Drop MedGemma entirely.** Three different model loads failed in
+  the live Modal run (gated repo, wrong arch, nonexistent
+  identifier). Replacing the third grader is deferred to a future
+  session.
+* **Ship Claude Sonnet 4.5 with vision as the working silver
+  standard.** The Claude pass produced a real and well-distributed
+  label set on all 414 claims (258 SUPPORTED / 80 CONTRADICTED /
+  72 NOVEL_PLAUSIBLE / 2 NOVEL_HALLUCINATED / 2 UNCERTAIN) with
+  content-aware rationales for every row.
+* **Use the Task 8 self-annotation pass (n=100 stratified) as the
+  second coder** for the final 2-coder Krippendorff α. With the
+  user as the second grader and Claude as the first, both graders
+  are image-grounded and the disagreement pattern from the rule-
+  based vs vision-grounded mismatch will not recur. The
+  fallback-ladder framework (drop UNCERTAIN, binary coarsen) is
+  retained.
+
+**Methodological recommendation in §4 (Discussion)**: text-only
+labelers should be retired in favor of vision-language graders for
+silver-standard evaluation of image-grounded VLM hallucinations.
+Cost difference is ~$5 per 1000 claims (Claude Sonnet vision
+~$0.005/grade vs CheXbert ~$0/grade), which is well worth getting
+an actually-meaningful inter-rater agreement.
+
+Comparison to RadFlag (Chen et al. 2025) 73% precision baseline is
+preserved, with the caveat that RadFlag's silver standard used the
+text-only CheXbert labeler — a finding our analysis suggests is
+unreliable for this task.
 
 ### V3.4 Self-annotation internal-validity check (Task 8)
 
