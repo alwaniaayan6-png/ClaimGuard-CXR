@@ -148,6 +148,15 @@ class DPOTrainingConfig:
     )
     output_dir: str = "/data/checkpoints/verifier_binary_v4_dpo"
     preference_data: str = "/data/counterfactual_preference_pairs_v3.json"
+    # Mixed-mode only: path to the full v3 training data for sampling
+    # faithful (label=0) examples to mix with the contradicted+cf pairs.
+    # Ignored when loss_mode != "consistency_mixed".
+    full_training_data: str = "/data/verifier_training_data_v3.json"
+    # Mixed-mode only: number of faithful examples to sample per
+    # contradicted+cf pair.  1.0 = balanced; 0.5 = under-sample
+    # faithful (faster training, more reliance on existing v3 weights);
+    # 2.0 = over-sample faithful (more conservative, less collapse risk).
+    faithful_per_cf: float = 1.0
     hf_backbone: str = "roberta-large"
     max_length: int = 256
     batch_size: int = 8
@@ -157,14 +166,22 @@ class DPOTrainingConfig:
     log_every: int = 100
     freeze_first_n_layers: int = 8
     seed: int = 42
-    target_label: int = 1  # contradicted class
+    target_label: int = 1  # contradicted class (used by old single-class consistency path)
 
-    # Loss mode selection.  "consistency" is the default (R-Drop /
-    # UDA) and the path that should be used for the paper's v4
-    # checkpoint.  "dpo" is the legacy Rafailov 2023 formulation
-    # with the chosen/rejected inversion bug documented above — kept
-    # ONLY for research comparison; do not use for production.
-    loss_mode: str = "consistency"
+    # Loss mode selection.
+    #   "consistency_mixed" — DEFAULT for v4 (post-2026-04-15 fix).
+    #     Uses per-example labels and mixes faithful (label=0) with
+    #     contradicted+cf (label=1).  Faithful rows get plain CE.
+    #     Contradicted+cf rows get CE on both branches + symmetric KL.
+    #   "consistency" — LEGACY single-class path.  Hardcodes
+    #     target_label=1 in the loss.  Trivially collapses on
+    #     contradicted-only training data (verified empirically on
+    #     2026-04-15: v4 OpenI acc dropped to 0.327 with per-class
+    #     F1 [0.000, 0.493], i.e. predicting CONTRA for everything).
+    #     KEPT ONLY FOR REPRODUCIBILITY of the failed run; do not use.
+    #   "dpo" — Rafailov 2023 DPO with the chosen/rejected inversion
+    #     bug.  Same do-not-use status, kept for ablation.
+    loss_mode: str = "consistency_mixed"
 
     # Consistency-mode hyperparameters (R-Drop defaults)
     ce_weight: float = 1.0          # weight on CE(original) + CE(counterfactual)
@@ -265,6 +282,147 @@ def load_preference_pairs(
                 })
 
     return pairs
+
+
+def load_mixed_training_data(
+    counterfactual_pairs_path: "os.PathLike[str] | str",
+    full_training_data_path: "os.PathLike[str] | str",
+    *,
+    faithful_per_cf: float = 1.0,
+    seed: int = 42,
+) -> list[dict[str, Any]]:
+    """Load mixed counterfactual + faithful training data for v4 v2.
+
+    The 2026-04-15 v4 v1 run failed by trivial collapse because the
+    training data was contradicted-only (Task 3a filtered to
+    ``label=1`` claims, Task 3b paraphrased those, the trainer's
+    ``_consistency_classifier_loss`` hardcoded ``target_label=1``).
+    R-Drop on a single-class dataset converges to "always predict
+    that class".  v4 OpenI dropped from 0.7545 to 0.327 with
+    per-class F1 ``[0.000, 0.493]``.
+
+    The fix is to MIX faithful (label=0) examples sampled from the
+    full v3 training data into the same dataloader, with their
+    actual labels.  Faithful rows have no counterfactual
+    paraphrase (Task 3b only generated cf for contradicted), so
+    they get a plain CE loss with no R-Drop term.  Contradicted
+    rows with cf get the full R-Drop loss with target=1.
+
+    The returned schema is unified::
+
+        [
+            {
+                "claim": str,
+                "evidence": str,
+                "counterfactual": str | None,  # None for faithful
+                "label": int,                  # 0 = faithful, 1 = contra
+            },
+            ...
+        ]
+
+    Rows are shuffled with the given seed so that mini-batches are
+    a uniform mix of cf-pairs and faithful rows.
+
+    Args:
+        counterfactual_pairs_path: Path to the JSON file produced
+            by ``scripts/generate_counterfactual_pairs.py``.  Each
+            row contributes one (claim, evidence, cf, label=1)
+            example.  Multi-cf rows expand to multiple examples.
+        full_training_data_path: Path to the full v3 training data
+            (e.g. ``/data/verifier_training_data_v3.json``).  Faithful
+            (label=0) rows are sampled from here.
+        faithful_per_cf: Ratio of faithful examples to cf-pair
+            examples.  1.0 = balanced (n_faithful == n_cf_pairs).
+            Values >1.0 over-sample faithful (more conservative,
+            less collapse risk).  Values <1.0 under-sample
+            (faster training, more reliance on existing v3
+            weights).
+        seed: RNG seed for the shuffle.
+
+    Returns:
+        A unified list of mixed training examples, shuffled.
+    """
+    import random
+
+    # 1. Load the cf pairs (already in the right format, just add label=1)
+    cf_rows = load_preference_pairs(counterfactual_pairs_path)
+    cf_examples = [
+        {
+            "claim": r["claim"],
+            "evidence": r["evidence"],
+            "counterfactual": r["counterfactual"],
+            "label": 1,
+        }
+        for r in cf_rows
+    ]
+    n_cf = len(cf_examples)
+
+    # 2. Load the full v3 training data and filter to faithful (label=0)
+    with open(full_training_data_path, "r", encoding="utf-8") as f:
+        all_v3 = json.load(f)
+    faithful_pool = [
+        r for r in all_v3
+        if r.get("label") == 0
+        and isinstance(r.get("claim"), str)
+        and r.get("claim", "").strip()
+    ]
+
+    # 3. Sample N faithful examples (with replacement if pool is too small)
+    n_faithful_target = int(round(n_cf * float(faithful_per_cf)))
+
+    # Defensive guard (pre-flight reviewer Finding 4, 2026-04-15):
+    # if the faithful pool is empty but we asked for faithful samples,
+    # fail loud rather than crashing on `rng.choice([])` later.  This
+    # protects against a stale or malformed full_training_data file
+    # that has no label=0 rows (e.g. wrong path, or a contradicted-
+    # only training set passed by mistake).
+    if n_faithful_target > 0 and not faithful_pool:
+        raise RuntimeError(
+            f"load_mixed_training_data: full_training_data at "
+            f"{full_training_data_path} contains no label=0 (faithful) "
+            f"rows.  Cannot sample {n_faithful_target} faithful "
+            f"examples.  Check the file path and schema.  This is the "
+            f"guard that would have prevented v4 v1 from collapsing — "
+            f"if this raises, we are about to repeat the bug."
+        )
+
+    rng = random.Random(seed)
+    if n_faithful_target <= len(faithful_pool):
+        faithful_sample = rng.sample(faithful_pool, n_faithful_target)
+    else:
+        # With replacement
+        faithful_sample = [
+            rng.choice(faithful_pool) for _ in range(n_faithful_target)
+        ]
+
+    # 4. Convert faithful rows to the unified schema (no counterfactual)
+    faithful_examples = []
+    for r in faithful_sample:
+        evidence = r.get("evidence", "")
+        if isinstance(evidence, list):
+            evidence = " [SEP] ".join(
+                str(e).strip() for e in evidence[:2]
+                if str(e).strip()
+            )
+        elif not isinstance(evidence, str):
+            evidence = str(evidence)
+        faithful_examples.append({
+            "claim": r["claim"].strip(),
+            "evidence": evidence.strip(),
+            "counterfactual": None,
+            "label": 0,
+        })
+
+    # 5. Mix and shuffle so batches contain both kinds
+    mixed = cf_examples + faithful_examples
+    rng.shuffle(mixed)
+
+    logger.info(
+        "Mixed dataset: %d cf-pair rows (label=1) + %d faithful rows "
+        "(label=0) = %d total (faithful_per_cf=%.2f)",
+        n_cf, len(faithful_examples), len(mixed), faithful_per_cf,
+    )
+    return mixed
 
 
 class DPOEarlyStopTracker:
@@ -378,6 +536,122 @@ def format_reward_histogram(
 # ---------------------------------------------------------------------------
 # Heavy helpers — torch required.  Imported lazily inside Modal.
 # ---------------------------------------------------------------------------
+
+
+def _consistency_mixed_loss(
+    *,
+    orig_logits: Any,
+    cf_logits: Any,  # may be None if no cf-pairs in this batch
+    labels: Any,  # tensor of per-example labels (int64), shape (B,)
+    cf_mask: Any,  # tensor of per-example bool, True if row has a cf
+    ce_weight: float = 1.0,
+    consistency_weight: float = 0.5,
+) -> tuple[Any, float, float, float]:
+    """Mixed-data consistency loss for the v4 v2 trainer.
+
+    Computes a unified loss over a batch that contains BOTH:
+
+    * Contradicted+counterfactual rows (cf_mask=True, label=1):
+      both branches contribute CE on their actual label, plus a
+      symmetric-KL consistency term to pull the two branches'
+      distributions together.
+    * Faithful rows (cf_mask=False, label=0): only the original
+      branch exists (no counterfactual was generated for faithful
+      examples in Task 3b).  These rows contribute CE only.
+
+    Loss formula::
+
+        L = CE_orig(label)
+          + (CE_cf(label_cf) if cf_mask.any() else 0)
+          + λ_cons · (1/2) · [KL(p_orig || stop_grad p_cf)
+                              + KL(p_cf || stop_grad p_orig)]
+            applied only to the cf_mask subset
+
+    The KL term has zero contribution from faithful rows, so the
+    loss reduces to plain CE for those.
+
+    The CRITICAL DIFFERENCE from ``_consistency_classifier_loss``
+    (the legacy single-class version): per-example labels.  The
+    legacy loss hardcoded ``target_label=1`` for every row, which
+    works only on a contradicted-only training set.  On a mixed
+    set with faithful rows (label=0) it would push the model toward
+    "always predict 1" again — exactly the v1 collapse failure
+    mode.  This loss reads the actual label from the batch and uses
+    it in both CE branches.
+
+    Args:
+        orig_logits: 2-class logits on the original (claim, evidence)
+            inputs for ALL rows in the batch.  Shape ``(B, 2)``.
+        cf_logits: 2-class logits on the counterfactual (cf, evidence)
+            inputs for the cf_mask=True subset.  Shape ``(N_cf, 2)``
+            where N_cf <= B, OR None if cf_mask is all-False.
+        labels: Per-example ground-truth labels.  Shape ``(B,)``,
+            int64.  0 = faithful, 1 = contradicted.
+        cf_mask: Per-example bool tensor of which rows have a
+            counterfactual.  Shape ``(B,)``.
+        ce_weight: Multiplier on CE terms.  Default 1.0.
+        consistency_weight: Multiplier on symmetric-KL term.
+            Default 0.5.
+
+    Returns:
+        ``(loss_tensor, ce_mean_float, consistency_kl_float,
+        agreement_mean_float)``
+    """
+    import torch
+    import torch.nn.functional as F
+
+    # CE on all rows (their actual labels)
+    ce_orig = F.cross_entropy(
+        orig_logits, labels, reduction="mean",
+    )
+
+    if cf_logits is not None and cf_mask.any():
+        # CE on the cf branch — per-example labels (sliced by mask)
+        cf_labels = labels[cf_mask]
+        ce_cf = F.cross_entropy(
+            cf_logits, cf_labels, reduction="mean",
+        )
+
+        # Symmetric KL on the cf subset only
+        orig_logits_cf = orig_logits[cf_mask]
+        log_p_orig = F.log_softmax(orig_logits_cf, dim=-1)
+        log_p_cf = F.log_softmax(cf_logits, dim=-1)
+        p_orig = log_p_orig.exp()
+        p_cf = log_p_cf.exp()
+        kl_orig_to_cf = F.kl_div(
+            log_p_orig, p_cf.detach(), reduction="batchmean",
+        )
+        kl_cf_to_orig = F.kl_div(
+            log_p_cf, p_orig.detach(), reduction="batchmean",
+        )
+        consistency_kl = 0.5 * (kl_orig_to_cf + kl_cf_to_orig)
+
+        loss = (
+            ce_weight * (ce_orig + ce_cf)
+            + consistency_weight * consistency_kl
+        )
+
+        with torch.no_grad():
+            ce_mean = 0.5 * (ce_orig + ce_cf).item()
+            cons_kl = consistency_kl.item()
+            # Per-target P agreement signal (label-1 since most cf
+            # rows are contradicted in our setup)
+            p_orig_y = p_orig.gather(
+                1, cf_labels.view(-1, 1).long(),
+            ).squeeze(-1)
+            p_cf_y = p_cf.gather(
+                1, cf_labels.view(-1, 1).long(),
+            ).squeeze(-1)
+            agreement = (p_cf_y - p_orig_y).mean().item()
+    else:
+        # No cf-pairs in this batch — pure CE training step.
+        loss = ce_weight * ce_orig
+        with torch.no_grad():
+            ce_mean = ce_orig.item()
+            cons_kl = 0.0
+            agreement = 0.0
+
+    return loss, ce_mean, cons_kl, agreement
 
 
 def _consistency_classifier_loss(
@@ -625,11 +899,26 @@ def _run_training(config_json: str) -> dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Refinement training on device=%s", device)
 
-    pairs = load_preference_pairs(config.preference_data)
-    logger.info("Loaded %d preference pairs", len(pairs))
+    # Load training data.  Branch on loss_mode:
+    #   "consistency_mixed" — load mixed cf + faithful via
+    #     load_mixed_training_data (DEFAULT for v4 v2)
+    #   "consistency" / "dpo" — load contradicted-only cf pairs via
+    #     load_preference_pairs (LEGACY single-class path)
+    _loss_mode_lower = (config.loss_mode or "consistency_mixed").lower()
+    if _loss_mode_lower == "consistency_mixed":
+        pairs = load_mixed_training_data(
+            counterfactual_pairs_path=config.preference_data,
+            full_training_data_path=config.full_training_data,
+            faithful_per_cf=config.faithful_per_cf,
+            seed=config.seed,
+        )
+        logger.info("Loaded %d mixed training rows", len(pairs))
+    else:
+        pairs = load_preference_pairs(config.preference_data)
+        logger.info("Loaded %d preference pairs", len(pairs))
     if not pairs:
         raise RuntimeError(
-            f"No preference pairs found in {config.preference_data}"
+            f"No training rows found in {config.preference_data}"
         )
 
     # ---- Policy (trainable) — full VerifierModel via canonical loader ----
@@ -732,16 +1021,75 @@ def _run_training(config_json: str) -> dict[str, Any]:
         )
         return chosen_logits, rejected_logits
 
+    def _forward_mixed(
+        model: Any,
+        batch: list[dict[str, Any]],
+    ) -> tuple[Any, Any, Any, Any]:
+        """Mixed forward: handles cf-pair AND faithful rows in one batch.
+
+        Returns ``(orig_logits, cf_logits, labels_tensor, cf_mask)``:
+          * orig_logits: ``(B, 2)`` for ALL rows
+          * cf_logits: ``(N_cf, 2)`` for the cf-mask subset only,
+            or None if cf_mask is all-False
+          * labels_tensor: ``(B,)`` int64 with the actual per-row label
+          * cf_mask: ``(B,)`` bool tensor
+        """
+        # 1. ALL rows go through the original branch
+        orig_claims = [b["claim"] for b in batch]
+        orig_evidences = [b["evidence"] for b in batch]
+        orig_enc = tokenizer(
+            orig_claims, orig_evidences,
+            padding=True, truncation=True,
+            max_length=config.max_length,
+            return_tensors="pt",
+        ).to(device)
+        orig_logits, _ = model(
+            input_ids=orig_enc["input_ids"],
+            attention_mask=orig_enc["attention_mask"],
+        )
+
+        # 2. Per-example labels
+        labels_tensor = torch.tensor(
+            [int(b.get("label", 0)) for b in batch],
+            dtype=torch.long, device=device,
+        )
+
+        # 3. cf_mask: which rows have a non-None counterfactual
+        cf_mask = torch.tensor(
+            [b.get("counterfactual") is not None for b in batch],
+            dtype=torch.bool, device=device,
+        )
+
+        # 4. cf branch — only on the cf_mask=True rows
+        cf_logits = None
+        if cf_mask.any():
+            cf_indices = [i for i, b in enumerate(batch)
+                          if b.get("counterfactual") is not None]
+            cf_claims = [batch[i]["counterfactual"] for i in cf_indices]
+            cf_evidences = [batch[i]["evidence"] for i in cf_indices]
+            cf_enc = tokenizer(
+                cf_claims, cf_evidences,
+                padding=True, truncation=True,
+                max_length=config.max_length,
+                return_tensors="pt",
+            ).to(device)
+            cf_logits, _ = model(
+                input_ids=cf_enc["input_ids"],
+                attention_mask=cf_enc["attention_mask"],
+            )
+
+        return orig_logits, cf_logits, labels_tensor, cf_mask
+
     rng = random.Random(config.seed)
     global_step = 0
     stop_reason: Optional[str] = None
     history: list[dict[str, Any]] = []
 
-    loss_mode = (config.loss_mode or "consistency").lower()
-    if loss_mode not in ("consistency", "dpo"):
+    loss_mode = (config.loss_mode or "consistency_mixed").lower()
+    if loss_mode not in ("consistency_mixed", "consistency", "dpo"):
         raise ValueError(
             f"unknown loss_mode={loss_mode!r}, expected "
-            "'consistency' or 'dpo'"
+            "'consistency_mixed', 'consistency', or 'dpo'"
         )
     logger.info("Training loss_mode=%s", loss_mode)
 
@@ -752,7 +1100,34 @@ def _run_training(config_json: str) -> dict[str, Any]:
             if not batch:
                 continue
 
-            if loss_mode == "consistency":
+            if loss_mode == "consistency_mixed":
+                # NEW MIXED PATH (default for v4 v2).  Handles per-
+                # example labels and faithful (no-cf) rows in the
+                # same batch.  Required because v4 v1 collapsed:
+                # training data was contradicted-only and the loss
+                # hardcoded target_label=1, so R-Drop converged
+                # trivially to "always predict contra".  Mixed
+                # training preserves the v3 ability to predict
+                # label=0 by including faithful examples with their
+                # actual labels.
+                orig_logits, cf_logits, labels_t, cf_mask_t = (
+                    _forward_mixed(policy_model, batch)
+                )
+                loss, ce_mean, cons_kl, agreement = (
+                    _consistency_mixed_loss(
+                        orig_logits=orig_logits,
+                        cf_logits=cf_logits,
+                        labels=labels_t,
+                        cf_mask=cf_mask_t,
+                        ce_weight=config.ce_weight,
+                        consistency_weight=config.consistency_weight,
+                    )
+                )
+                margin = ce_mean
+                kl_proxy = cons_kl
+                chosen_reward = agreement
+
+            elif loss_mode == "consistency":
                 # R-Drop / UDA consistency path (DEFAULT, CORRECT).
                 # We only need the policy model — no reference — but
                 # we compute BOTH sides of the pair in the same
@@ -1022,15 +1397,33 @@ def _parse_cli(argv: list[str]) -> DPOTrainingConfig:
     # Consistency-mode (default) hyperparameters
     parser.add_argument(
         "--loss-mode",
-        choices=("consistency", "dpo"),
+        choices=("consistency_mixed", "consistency", "dpo"),
         default=defaults.loss_mode,
         help=(
-            "'consistency' (default, R-Drop/UDA style symmetric-KL) "
-            "is the correct path for ClaimGuard v4. 'dpo' is the "
-            "legacy Rafailov 2023 DPO loss — kept for research "
-            "comparison only; do NOT use for the paper's headline v4 "
-            "checkpoint (chosen/rejected inversion pathology, see "
-            "top-of-file docstring)."
+            "'consistency_mixed' (default, post-2026-04-15 v4 v1 fix): "
+            "R-Drop with per-example labels and mixed cf+faithful data. "
+            "'consistency' is the broken single-class path that "
+            "collapsed v4 v1 to predict-contra-everywhere — kept ONLY "
+            "for ablation. 'dpo' is the legacy Rafailov 2023 DPO loss "
+            "with the chosen/rejected inversion bug — kept for "
+            "research comparison only."
+        ),
+    )
+    parser.add_argument(
+        "--full-training-data",
+        default=defaults.full_training_data,
+        help=(
+            "consistency_mixed mode only: path to the full v3 training "
+            "data file (sampled for label=0 faithful examples)."
+        ),
+    )
+    parser.add_argument(
+        "--faithful-per-cf",
+        type=float, default=defaults.faithful_per_cf,
+        help=(
+            "consistency_mixed mode only: ratio of faithful examples "
+            "to cf-pair examples.  1.0 = balanced (default).  "
+            "Higher = more conservative, less collapse risk."
         ),
     )
     parser.add_argument(
@@ -1050,6 +1443,8 @@ def _parse_cli(argv: list[str]) -> DPOTrainingConfig:
         base_checkpoint=args.base_checkpoint,
         output_dir=args.output_dir,
         preference_data=args.preference_data,
+        full_training_data=args.full_training_data,
+        faithful_per_cf=args.faithful_per_cf,
         hf_backbone=args.hf_backbone,
         max_length=args.max_length,
         batch_size=args.batch_size,

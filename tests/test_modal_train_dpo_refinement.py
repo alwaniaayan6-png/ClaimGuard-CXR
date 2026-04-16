@@ -73,14 +73,21 @@ class TestDPOTrainingConfig(unittest.TestCase):
 
     def test_consistency_mode_defaults(self) -> None:
         """Reviewer-requested fix: the default loss mode is the
-        R-Drop consistency regularizer, NOT legacy DPO. Lock the
-        default + hyperparameter values so a future edit can't
-        silently revert to the broken DPO-only path."""
+        R-Drop consistency regularizer with MIXED data (post-2026-04-15
+        v4 v1 collapse fix), NOT legacy DPO. Lock the default +
+        hyperparameter values so a future edit can't silently revert
+        to the broken DPO-only path or the broken single-class
+        consistency path."""
         c = DPOTrainingConfig()
-        self.assertEqual(c.loss_mode, "consistency")
+        self.assertEqual(c.loss_mode, "consistency_mixed")
         self.assertEqual(c.ce_weight, 1.0)
         self.assertEqual(c.consistency_weight, 0.5)
         self.assertEqual(c.ce_blowup_threshold, 2.5)
+        self.assertEqual(c.faithful_per_cf, 1.0)
+        self.assertEqual(
+            c.full_training_data,
+            "/data/verifier_training_data_v3.json",
+        )
 
     def test_json_round_trip(self) -> None:
         c = DPOTrainingConfig(lr=1e-5, beta=0.2)

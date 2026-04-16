@@ -147,10 +147,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--loss-mode",
-        choices=["consistency", "dpo"],
-        default="consistency",
-        help="'consistency' = R-Drop (PAPER PATH).  'dpo' is broken "
-             "and kept only for ablation; do NOT use for v4.",
+        choices=["consistency_mixed", "consistency", "dpo"],
+        default="consistency_mixed",
+        help="'consistency_mixed' (default, post-2026-04-15 fix): "
+             "R-Drop with mixed cf+faithful data and per-example "
+             "labels. 'consistency' is the broken single-class path "
+             "that collapsed v4 v1. 'dpo' is the legacy DPO path with "
+             "the chosen/rejected inversion bug. Use consistency_mixed.",
     )
     parser.add_argument(
         "--num-epochs", type=int, default=defaults.num_epochs,
