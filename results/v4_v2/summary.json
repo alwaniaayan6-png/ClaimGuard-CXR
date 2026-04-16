@@ -1,0 +1,59 @@
+{
+  "v3_synthetic_acc": 0.9877,
+  "v4_v2_synthetic_acc": 0.9596,
+  "v4_v2_synthetic_acc_delta_pp": -2.81,
+  "v3_openi_acc": 0.7545,
+  "v4_v2_openi_acc": 0.7623,
+  "v4_v2_openi_acc_delta_pp": 0.78,
+  "ho_baseline_acc": 0.9857,
+  "v3_ho_gap_pp": 0.2,
+  "v4_v2_ho_gap_pp": -2.61,
+  "plan_target_ho_gap_pp": 5.0,
+  "meets_plan_target": false,
+  "reframe": "HO gap on synthetic data is the wrong metric. R-Drop trades 2.81 pp synthetic for +0.78 pp OpenI. Cross-dataset transfer is the right evaluation axis.",
+  "v4_v2_synthetic_cfbh": {
+    "alpha_0.05": {
+      "fdr": 0.0158,
+      "n_green": 9604
+    },
+    "alpha_0.10": {
+      "fdr": 0.029,
+      "n_green": 10120
+    },
+    "alpha_0.15": {
+      "fdr": 0.044,
+      "n_green": 10423
+    },
+    "alpha_0.20": {
+      "fdr": 0.0614,
+      "n_green": 10643
+    }
+  },
+  "v4_v2_openi_cfbh": {
+    "alpha_0.05": {
+      "fdr": "nan",
+      "n_green": 0
+    },
+    "alpha_0.10": {
+      "fdr": "nan",
+      "n_green": 0
+    },
+    "alpha_0.15": {
+      "fdr": "nan",
+      "n_green": 0
+    },
+    "alpha_0.20": {
+      "fdr": 0.0051,
+      "n_green": 197
+    }
+  },
+  "v4_v1_collapsed": true,
+  "v4_v1_reason": "Single-class (contradicted-only) training data + hardcoded target_label=1 in loss \u2192 trivially predict CONTRADICTED for everything",
+  "v4_v2_training": {
+    "pairs_loaded": 16830,
+    "steps": 2104,
+    "final_loss": 0.00146,
+    "final_kl": 9.4e-05,
+    "stop_reason": null
+  }
+}

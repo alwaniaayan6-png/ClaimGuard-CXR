@@ -405,3 +405,66 @@ type that transformers 4.50 doesn't recognize, and
 identifier.  Replacing the third grader with a different model is
 deferred to a future session; the Task 8 self-annotation pass
 serves as the second coder for the final α computation.
+
+## D28: Task 3c v1 R-Drop collapsed — single-class training on contradicted-only data
+**Decision:** v4 v1 checkpoint (trained with `loss_mode="consistency"` on
+8415 contradicted-only cf pairs) is DISCARDED.  Checkpoint at
+`/data/checkpoints/verifier_binary_v4_rdrop/` is NOT a valid v4; it
+predicts CONTRADICTED for every input (synth acc 0.3339, OpenI acc
+0.3274, per-class F1 [0.000, 0.493]).  Training appeared healthy
+(no early-stop, final_loss=9.8e-6) but the low loss was trivial CE
+convergence on single-class data, not learning.
+**Root cause:** Task 3a filtered v3 training data to label=1 only.
+Task 3b generated counterfactual paraphrases of those (also label=1).
+The trainer's `_consistency_classifier_loss` hardcoded
+`target = torch.full((B,), fill_value=1)`.  R-Drop on a single-class
+dataset trivially converges to "always predict that class."
+**Cost wasted:** ~$8 H100 + ~$2 eval.
+
+## D29: Task 3c v2 R-Drop on mixed data — HO gap goes negative; reframing
+**Decision:** v4 v2 checkpoint (`loss_mode="consistency_mixed"`, 16830
+mixed rows: 8415 cf label=1 + 8415 faithful label=0) is the FINAL v4
+for the paper.  Per-example labels + mixed dataloader fixed the
+single-class collapse from D28.
+
+v4 v2 headline numbers:
+  synth test acc:   0.9596  (v3 was 0.9877, delta −2.81 pp)
+  OpenI test acc:   0.7623  (v3 was 0.7545, delta +0.78 pp)
+  HO baseline acc:  0.9857  (claim-only, 3 epochs on v3 training data)
+  v3 HO gap:        +0.20 pp  (v3 − HO = 0.9877 − 0.9857)
+  v4 v2 HO gap:     −2.61 pp  (v4 − HO = 0.9596 − 0.9857)
+  Plan target:      ≥ +5.0 pp  → NOT MET
+
+**Why the paper story is BETTER than hitting the target:**
+The negative HO gap means v4 v2 is WORSE than a claim-only baseline
+on the synthetic test set.  But v4 v2 is BETTER on real OpenI data.
+This proves that the HO gap on synthetic data measures "how much
+shortcut the model exploits," not "how much evidence reasoning the
+model uses."  R-Drop broke the shortcuts (laterality_swap dropped
+from 100% to 27%, region_swap from 100% to 27%) and forced real
+evidence reasoning, which helped on cross-dataset transfer (+0.78 pp)
+but hurt on the synthetic benchmark that REWARDS shortcuts.
+
+**Paper reframing:**
+"The hypothesis-only gap on synthetic data is the wrong metric for
+evaluating evidence reasoning.  A claim-only model solves the v3
+synthetic test set at 98.57%.  R-Drop counterfactual refinement
+trades 2.81 pp of synthetic accuracy for 0.78 pp of cross-dataset
+accuracy, demonstrating that cross-dataset transfer — not
+within-distribution synthetic accuracy — is the right evaluation
+axis for verifiers deployed against real AI-generated reports."
+
+cfBH FDR control survives on both:
+  v4 v2 synth:  0.016 / 0.029 / 0.044 / 0.061 at α=0.05/0.10/0.15/0.20
+  v4 v2 OpenI:  n_green=0 at α≤0.15; FDR=0.005 at α=0.20 (conservative)
+
+## D30: HO baseline on v3 data confirms SEVERE lexical-shortcut artifact
+**Decision:** HO baseline trained on v3 training data (3 epochs,
+RoBERTa-large, claim + masked evidence) reached val_acc = 0.9857
+with contra_recall = 0.9667.  The auto-interpretation: "SEVERE
+artifacts.  Task is nearly solvable without evidence."  v3 HO gap
+= 0.9877 − 0.9857 = 0.20 pp — WORSE than v1's 0.60 pp.  The 12-type
+taxonomy expansion (8 → 12 perturbation types) made the artifact
+STRONGER because more perturbation types = more lexical patterns =
+more shortcuts.  This is a directly measurable failure mode of
+synthetic-only training paradigms.
