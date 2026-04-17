@@ -24,13 +24,14 @@ from typing import Optional
 
 # Per-phase caps in USD (from RUNBOOK §Budget tracking)
 PHASE_CAPS = {
-    3: 300,   # VLM generation
-    4: 500,   # GroundBench + LLM labeling
-    6: 800,   # Training (5 seeds × 5 configs)
-    7: 200,   # Evaluation
-    8: 100,   # Release
+    3: 120,   # VLM generation (3 generators, 3 sites, 2 temps)
+    4: 150,   # GroundBench + LLM labeling (GPT-4o-mini)
+    5: 20,    # Pre-flight review (Opus agent, CPU)
+    6: 540,   # Training (3 seeds × 4 configs on H100)
+    7: 50,    # Evaluation (4 core sites)
+    8: 20,    # Release (HF weights + code tag)
 }
-TOTAL_CAP = 1_900
+TOTAL_CAP = 900
 HALT_FACTOR = 1.10  # auto-halt if phase > 110% of cap
 
 LOG_FILE = Path(__file__).parent.parent.parent / "budget_log.jsonl"

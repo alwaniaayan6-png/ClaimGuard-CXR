@@ -10,10 +10,10 @@ phase has a gate: do not proceed past a gate until its criterion is met.
 
 ## Phase 0 — Governance and infrastructure
 
-### 0.1 Request compute lift
+### 0.1 Confirm budget cap
 ```bash
-# Increase Modal budget cap from $900 → $2,500 via the dashboard.
-# Document the new cap in progress.md.
+# Budget cap stays at $900 (already set on Modal dashboard).
+# Do NOT increase — all phases are scoped to fit within $900 total.
 ```
 
 ### 0.2 IRB exempt determination (Weill Cornell)
@@ -159,28 +159,21 @@ Run the five VLM generators over each site's images.
 
 ```bash
 cd /Users/aayanalwani/VeriFact/verifact
-# Start with CheXagent on CheXpert Plus at default temperatures:
-modal run --detach v5/modal/run_vlms.py::run_vlms_entrypoint \
-    --generator chexagent-8b --site chexpert_plus --limit 0 \
-    --temperatures 0.3,0.7,1.0,1.2 --seeds 101,202
-# Repeat for each generator:
-for gen in maira-2 medgemma-4b llava-rad llama-3.2-11b-vision ; do
-    modal run --detach v5/modal/run_vlms.py::run_vlms_entrypoint \
-        --generator "$gen" --site chexpert_plus --limit 0 \
-        --temperatures 0.3,0.7,1.0,1.2 --seeds 101,202
-done
-# Then for cross-site eval:
-for site in openi padchest brax ms_cxr ; do
-    for gen in chexagent-8b maira-2 medgemma-4b llava-rad llama-3.2-11b-vision ; do
+# 3 generators × 3 sites × 2 temps = 18 jobs (budget-safe at $120 cap)
+for gen in chexagent-8b maira-2 medgemma-4b ; do
+    for site in chexpert_plus openi rsna_pneumonia ; do
         modal run --detach v5/modal/run_vlms.py::run_vlms_entrypoint \
             --generator "$gen" --site "$site" --limit 0 \
-            --temperatures 0.3,0.7,1.0,1.2 --seeds 101,202
+            --temperatures 0.3,1.0 --seeds 101,202
     done
 done
 ```
 
-Budget watch: estimate $150–$300 depending on throughput; kill if budget >
-110% of phase cap.
+Budget watch: check `python v5/scripts/budget_daily.py --phase 3` before
+each batch. Kill immediately if spend hits $132 (110% of cap).
+
+Note: llava-rad and llama-3.2-11b-vision held as ablation-only; add only
+if phase 3 spend < $80 after the 18 primary jobs complete.
 
 **Gate G3:** each (site × generator × temperature × seed) has a JSONL under
 `/data/vlm_reports/<site>/<generator>/t<t>_s<s>.jsonl` with ≥ 80% success rate.
@@ -286,16 +279,17 @@ modal run --detach v5/modal/train_v5.py::train_v5_entrypoint --config v5_3_contr
 ```
 Gate: both gaps improve by ≥ 3 pp vs v5.2.
 
-### 6.5 v5.4-final (5 seeds, MC-dropout uncertainty head)
+### 6.5 v5.4-final (3 seeds, MC-dropout uncertainty head)
 ```bash
-for seed in 17 29 41 53 67 ; do
+for seed in 17 41 67 ; do
     SEED=$seed modal run --detach v5/modal/train_v5.py::train_v5_entrypoint \
         --config v5_4_final
 done
 ```
-Report mean ± 95% CI on headline numbers.
+Report mean ± 95% CI on headline numbers. 3 seeds is sufficient for
+a Nature MI submission; add seeds 29 and 53 only if variance > 2 pp.
 
-**Gate G6:** v5.4-final mean val-acc ≥ 0.90 with 5-seed variance ≤ 2 pp.
+**Gate G6:** v5.4-final mean val-acc ≥ 0.90 with 3-seed variance ≤ 2 pp.
 
 ### 6.6 Contingency if HO gap fails
 Apply `v5_3_contrast`'s adversarial filter at stronger threshold (0.85 →
@@ -433,16 +427,18 @@ reproducer report.
 
 ## Budget tracking
 
-Maintain a daily aggregator (script TBD in `scripts/budget_daily.py`). Per-
-phase caps:
+Hard cap: **$900 total** (existing Modal limit — do not increase).
+Run `python v5/scripts/budget_daily.py --all` before each phase to check spend.
+Auto-halt if any phase hits 110% of its cap.
 
-| Phase | Cap (USD) | Expected |
-|---|---:|---:|
-| 3 (VLM gen) | 300 | 200 |
-| 4 (GroundBench + LLM labeling) | 500 | 400 |
-| 6 (training, 5 seeds × 5 configs) | 800 | 600 |
-| 7 (evaluation) | 200 | 150 |
-| 8 (release) | 100 | 50 |
-| **Total** | **1,900** | **1,400** |
+| Phase | Cap (USD) | Expected | Scope reduction vs original |
+|---|---:|---:|---|
+| 3 (VLM gen) | 120 | 80 | 3 generators (MAIRA-2, CheXagent, MedGemma), 3 sites, 2 temps |
+| 4 (GroundBench + LLM labeling) | 150 | 110 | GPT-4o-mini labeler (10× cheaper); rule-extractor primary |
+| 5 (pre-flight review) | 20 | 15 | Opus agent, CPU-only |
+| 6 (training, 3 seeds × 4 configs) | 540 | 480 | Drop 2 seeds, skip v5.1 standalone (fused into v5.2) |
+| 7 (evaluation, 4 sites) | 50 | 35 | Core sites only: CheXpert+, OpenI, RSNA, MS-CXR |
+| 8 (release) | 20 | 10 | Weights to HF, code tag — no Zenodo until paper accepted |
+| **Total** | **900** | **730** | |
 
-Auto-halt if any phase exceeds 110% of its cap. Escalate to user for re-auth.
+Per-phase escalation path: if phase 6 overruns, reduce to 2 seeds and document in manuscript.

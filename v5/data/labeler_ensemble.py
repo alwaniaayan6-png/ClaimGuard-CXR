@@ -61,7 +61,42 @@ def _encode_image_to_b64(image_path: Path) -> str:
     return base64.b64encode(image_path.read_bytes()).decode("utf-8")
 
 
+def grade_gpt4o_mini(image_path: Path, claim_text: str, report_text: str) -> LabelerOutput:
+    """Primary budget labeler — gpt-4o-mini with vision (~10× cheaper than gpt-4o)."""
+    from openai import OpenAI  # type: ignore[import]
+
+    client = OpenAI()
+    img_b64 = _encode_image_to_b64(image_path)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                {"type": "text", "text": f"Report: {report_text[:2000]}\nClaim: {claim_text}"},
+            ],
+        },
+    ]
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        response_format={"type": "json_object"},
+        max_tokens=400,
+    )
+    text = resp.choices[0].message.content or "{}"
+    parsed = json.loads(text)
+    return LabelerOutput(
+        grader_id="gpt-4o-mini",
+        grader_version=resp.model,
+        label=str(parsed.get("label", "UNCERTAIN")).upper(),
+        confidence=float(parsed.get("confidence", 0.5)),
+        rationale=str(parsed.get("rationale", ""))[:200],
+        prompt_version="v5.0",
+    )
+
+
 def grade_gpt4o(image_path: Path, claim_text: str, report_text: str) -> LabelerOutput:
+    """High-quality labeler — reserved for κ-validation subset only (budget guard)."""
     from openai import OpenAI  # type: ignore[import]
 
     client = OpenAI()
@@ -186,8 +221,10 @@ def ensemble_label(
     *,
     image_id: str | None = None,
 ) -> EnsembleLabel:
+    # Budget-conscious ensemble: gpt-4o-mini (primary) + Claude Sonnet (secondary)
+    # + Llama-405B text-only tiebreaker. gpt-4o reserved for κ-validation subset.
     outs: list[LabelerOutput] = []
-    for fn in (grade_gpt4o, grade_claude_sonnet_45):
+    for fn in (grade_gpt4o_mini, grade_claude_sonnet_45):
         try:
             outs.append(fn(image_path, claim_text, report_text))
         except Exception as exc:  # noqa: BLE001
