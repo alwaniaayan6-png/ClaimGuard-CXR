@@ -221,10 +221,11 @@ def ensemble_label(
     *,
     image_id: str | None = None,
 ) -> EnsembleLabel:
-    # Budget-conscious ensemble: gpt-4o-mini (primary) + Claude Sonnet (secondary)
-    # + Llama-405B text-only tiebreaker. gpt-4o reserved for κ-validation subset.
+    # Primary: gpt-4o-mini if OPENAI_API_KEY set, else Claude Sonnet 4.5 only.
+    import os
+    fns = (grade_gpt4o_mini, grade_claude_sonnet_45) if os.environ.get("OPENAI_API_KEY") else (grade_claude_sonnet_45,)
     outs: list[LabelerOutput] = []
-    for fn in (grade_gpt4o_mini, grade_claude_sonnet_45):
+    for fn in fns:
         try:
             outs.append(fn(image_path, claim_text, report_text))
         except Exception as exc:  # noqa: BLE001

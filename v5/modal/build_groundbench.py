@@ -47,12 +47,7 @@ image = (
 
 volume = modal.Volume.from_name("claimguard-v5-data")
 
-secrets: list[modal.Secret] = []
-for name in ("anthropic", "openai"):
-    try:
-        secrets.append(modal.Secret.from_name(name))
-    except Exception:
-        pass
+secrets: list[modal.Secret] = [modal.Secret.from_name("anthropic")]
 
 
 @app.function(image=image, cpu=8.0, memory=32_000, timeout=60 * 60 * 6, volumes={"/data": volume}, secrets=secrets)
