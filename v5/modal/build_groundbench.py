@@ -18,7 +18,7 @@ from pathlib import Path
 
 import modal
 
-VERIFACT_ROOT = Path(__file__).resolve().parents[2]
+VERIFACT_ROOT = Path(__file__).resolve().parent.parent.parent if Path(__file__).resolve().parent.name == "modal" else Path("/root/verifact")
 
 app = modal.App("claimguard-v5-groundbench")
 
@@ -78,25 +78,46 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
     out_root = P("/data/groundbench_v5") / site
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # Dispatcher
-    cfg = {
-        "chexpert_plus": (ds_chexpert.iter_chexpert_plus, ds_chexpert.annotations_for_record, "/data/chexpert_plus"),
-        "openi": (ds_openi.iter_openi, ds_openi.annotations_for_record, "/data/openi"),
-        "padchest": (ds_padchest.iter_padchest, ds_padchest.annotations_for_record, "/data/padchest"),
-        "brax": (ds_brax.iter_brax, ds_brax.annotations_for_record, "/data/brax"),
-        "rsna_pneumonia": (ds_rsna.iter_rsna, ds_rsna.annotations_for_record, "/data/rsna_pneumonia"),
-        "siim_acr": (ds_siim.iter_siim, ds_siim.annotations_for_record, "/data/siim_acr_pneumothorax"),
-        "object_cxr": (ds_objcxr.iter_object_cxr, ds_objcxr.annotations_for_record, "/data/object_cxr"),
-        "chestx_det10": (ds_cx10.iter_chestx_det10, ds_cx10.annotations_for_record, "/data/chestx_det10"),
+    # Dispatcher — lambdas handle each loader's unique signature
+    site_cfg = {
+        "chexpert_plus": (
+            lambda: ds_chexpert.iter_chexpert_plus(
+                metadata_csv=P("/data/chexpert_plus_meta/df_chexpert_plus_240401.csv"),
+                require_image=False,
+            ),
+            ds_chexpert.annotations_for_record,
+        ),
+        "openi": (
+            lambda: ds_openi.iter_openi(
+                image_root=P("/data/openi"),
+                report_csv=P("/data/iu_xray_meta/iu_xray_reports.csv"),
+            ),
+            ds_openi.annotations_for_record,
+        ),
+        "chestx_det10": (
+            lambda: ds_cx10.iter_chestx_det10(
+                annot_root=P("/data/chestx_det10"),
+                image_root=P("/data/chestx_det10_images"),
+            ),
+            ds_cx10.annotations_for_record,
+        ),
+        "padchest": (
+            lambda: ds_padchest.iter_padchest(P("/data/padchest")),
+            ds_padchest.annotations_for_record,
+        ),
+        "brax": (
+            lambda: ds_brax.iter_brax(P("/data/brax")),
+            ds_brax.annotations_for_record,
+        ),
     }
-    if site not in cfg:
-        raise ValueError(f"Unknown site {site}; valid: {list(cfg)}")
-    iter_fn, ann_fn, root = cfg[site]
+    if site not in site_cfg:
+        raise ValueError(f"Unknown site {site}; valid: {list(site_cfg)}")
+    iter_callable, ann_fn = site_cfg[site]
 
     rows = []
     summary_counts = {"images": 0, "claims": 0}
 
-    for idx, rec in enumerate(iter_fn(P(root))):
+    for idx, rec in enumerate(iter_callable()):
         if limit and idx >= limit:
             break
         annotations: list[Annotation] = ann_fn(rec)

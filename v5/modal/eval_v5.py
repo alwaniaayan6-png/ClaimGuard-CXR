@@ -11,7 +11,7 @@ from pathlib import Path
 
 import modal
 
-VERIFACT_ROOT = Path(__file__).resolve().parents[2]
+VERIFACT_ROOT = Path(__file__).resolve().parent.parent.parent if Path(__file__).resolve().parent.name == "modal" else Path("/root/verifact")
 
 app = modal.App("claimguard-v5-eval")
 
