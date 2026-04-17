@@ -36,6 +36,11 @@ class ChestXDet10Record:
 DEFAULT_ANNOT_ROOT = Path.home() / "data" / "chestx_det10"
 DEFAULT_IMAGE_ROOT = Path.home() / "data" / "chestx_det10_images"
 
+# Inner dirs after unzipping deepwise.com archives:
+#   train_data.zip → train/train-old/*.png
+#   test_data.zip  → test/test_data/*.png
+_SPLIT_SUBDIRS = {"train": "train/train-old", "test": "test/test_data"}
+
 
 def iter_chestx_det10(
     annot_root: Path = DEFAULT_ANNOT_ROOT,
@@ -61,7 +66,8 @@ def iter_chestx_det10(
         with manifest.open() as f:
             records = json.load(f)
 
-        img_dir = image_root / split if (image_root / split).exists() else image_root
+        subdir = _SPLIT_SUBDIRS.get(split, split)
+        img_dir = image_root / subdir if (image_root / subdir).exists() else image_root
 
         for rec in records:
             fname = rec.get("file_name", "")

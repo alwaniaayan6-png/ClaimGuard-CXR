@@ -58,69 +58,37 @@ unit tests green.
 
 Each dataset lands in `/data/<site>/` on the `claimguard-data` Modal volume.
 
-### 1.1 Already available (via Laughney lab)
-- CheXpert Plus: `/data/chexpert_plus/`
-- OpenI: `/data/openi/`
+### 1.1 Already on disk (Laughney lab) — no action needed
 
-### 1.2 Downloadable (no credentialing)
+| Dataset | Local path | Status |
+|---------|-----------|--------|
+| CheXpert Plus reports | `~/data/claimguard/chexpert-plus/df_chexpert_plus_240401.csv` | ✅ 223,462 reports |
+| CheXpert Plus images | HPC only (not local) | images on HPC |
+| OpenI reports | `~/data/claimguard/iu-xray/iu_xray_reports.csv` | ✅ 3,996 reports |
+| OpenI images | `~/data/openi/` | ✅ 3,850 PNGs |
+| ChestX-Det10 annotations | `~/data/chestx_det10/` | ✅ train.json + test.json |
+| ChestX-Det10 images | `~/data/chestx_det10_images/` | ✅ 3,543 PNGs |
 
-MS-CXR (HuggingFace):
+### 1.2 Upload to Modal volume
+
 ```bash
-cd /Users/aayanalwani/VeriFact/verifact
-python scripts/download_ms_cxr.py --out /Users/aayanalwani/data/ms_cxr
-# Then rsync to Modal volume:
-modal volume put claimguard-data /Users/aayanalwani/data/ms_cxr /ms_cxr
+# Upload the three datasets we have locally:
+modal volume put claimguard-v5-data /Users/aayanalwani/data/openi /openi
+modal volume put claimguard-v5-data /Users/aayanalwani/data/chestx_det10 /chestx_det10
+modal volume put claimguard-v5-data /Users/aayanalwani/data/chestx_det10_images /chestx_det10_images
+modal volume put claimguard-v5-data /Users/aayanalwani/data/claimguard/chexpert-plus /chexpert_plus_meta
+modal volume put claimguard-v5-data /Users/aayanalwani/data/claimguard/iu-xray /iu_xray_meta
+# CheXpert Plus images: upload from HPC directly (large; ~300 GB)
 ```
 
-RSNA Pneumonia (Kaggle):
-```bash
-kaggle competitions download -c rsna-pneumonia-detection-challenge
-unzip -d /Users/aayanalwani/data/rsna_pneumonia rsna-pneumonia-detection-challenge.zip
-modal volume put claimguard-data /Users/aayanalwani/data/rsna_pneumonia /rsna_pneumonia
-```
+**Dropped from scope (no Kaggle required):**
+- RSNA Pneumonia — Kaggle-only; coverage partially replaced by ChestX-Det10 (Consolidation, Atelectasis)
+- SIIM-ACR Pneumothorax — Kaggle-only; Pneumothorax already in ChestX-Det10
+- Object-CXR — GitHub repo deleted; challenge over
+- MS-CXR — Images are MIMIC-CXR (PhysioNet-gated)
 
-SIIM-ACR Pneumothorax (Kaggle):
-```bash
-kaggle competitions download -c siim-acr-pneumothorax-segmentation
-unzip -d /Users/aayanalwani/data/siim_acr_pneumothorax siim-acr-pneumothorax-segmentation.zip
-modal volume put claimguard-data /Users/aayanalwani/data/siim_acr_pneumothorax /siim_acr_pneumothorax
-```
-
-Object-CXR (Github / JF Healthcare):
-```bash
-git clone https://github.com/jfhealthcare/object-CXR /Users/aayanalwani/data/object_cxr
-modal volume put claimguard-data /Users/aayanalwani/data/object_cxr /object_cxr
-```
-
-ChestX-Det10 (Github):
-```bash
-git clone https://github.com/Deepwise-AILab/ChestX-Det10-Dataset /Users/aayanalwani/data/chestx_det10
-modal volume put claimguard-data /Users/aayanalwani/data/chestx_det10 /chestx_det10
-```
-
-NIH ChestX-ray14 (NIH box share):
-```bash
-# Follow instructions at https://nihcc.app.box.com/v/ChestXray-NIHCC
-# Download images_001.tar.gz through images_012.tar.gz; unpack to /Users/aayanalwani/data/nih_cxr14
-modal volume put claimguard-data /Users/aayanalwani/data/nih_cxr14 /nih_cxr14
-```
-
-### 1.3 Lightweight registrations (not credentialing)
-
-PadChest (BIMCV): register at https://bimcv.cipf.es/bimcv-projects/padchest/ with
-institutional email (Laughney lab affiliation). Download:
-```bash
-# follow BIMCV instructions once approved
-modal volume put claimguard-data /Users/aayanalwani/data/padchest /padchest
-```
-
-BRAX (IEEE DataPort): register at https://ieee-dataport.org/open-access/brax-brazilian-labeled-chest-x-ray-dataset
-```bash
-modal volume put claimguard-data /Users/aayanalwani/data/brax /brax
-```
-
-**Gate G1:** All non-credentialed datasets in `/data/` on the Modal volume;
-`modal volume ls claimguard-data` lists the expected sites.
+**Gate G1:** `modal volume ls claimguard-v5-data` shows `/openi`, `/chestx_det10`,
+`/chestx_det10_images`, `/chexpert_plus_meta`, `/iu_xray_meta`.
 
 ---
 
