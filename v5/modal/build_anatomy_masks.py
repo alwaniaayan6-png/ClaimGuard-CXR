@@ -26,6 +26,8 @@ image = (
         "scipy==1.14.1",
         "torchxrayvision==1.3.5",
         "scikit-image==0.24.0",
+        "pyyaml==6.0.2",
+        "pandas==2.2.2",
     )
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
