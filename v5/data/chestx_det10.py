@@ -33,32 +33,61 @@ class ChestXDet10Record:
     boxes: list[tuple[str, tuple[float, float, float, float]]]  # (native_label, bbox_norm)
 
 
-def iter_chestx_det10(root: Path) -> Iterator[ChestXDet10Record]:
+DEFAULT_ANNOT_ROOT = Path.home() / "data" / "chestx_det10"
+DEFAULT_IMAGE_ROOT = Path.home() / "data" / "chestx_det10_images"
+
+
+def iter_chestx_det10(
+    annot_root: Path = DEFAULT_ANNOT_ROOT,
+    image_root: Path = DEFAULT_IMAGE_ROOT,
+    splits: tuple[str, ...] = ("train", "test"),
+) -> Iterator[ChestXDet10Record]:
+    """Iterate ChestX-Det10 records.
+
+    Annotation format (actual, from Deepwise AI Lab repo):
+        [{"file_name": "36204.png", "syms": ["Nodule"], "boxes": [[x1,y1,x2,y2], ...]}, ...]
+    where x1,y1,x2,y2 are absolute pixel coordinates (top-left, bottom-right).
+
+    Images live in image_root/{train,test}/ after unzipping train_data.zip / test_data.zip.
+    """
     import json
 
     from PIL import Image
 
-    manifest = root / "ChestX_Det_train.json"
-    if not manifest.exists():
-        manifest = root / "ChestX_Det_test.json"
-    with manifest.open() as f:
-        records = json.load(f)
-    for rec in records:
-        image_id = rec.get("file_name", rec.get("image_id"))
-        image_path = root / "images" / image_id
-        if not image_path.exists():
+    for split in splits:
+        manifest = annot_root / f"{split}.json"
+        if not manifest.exists():
             continue
-        W, H = Image.open(image_path).size
-        boxes: list[tuple[str, tuple[float, float, float, float]]] = []
-        for b in rec.get("boxes", []):
-            x1, y1, x2, y2 = b[:4]
-            label = b[4] if len(b) >= 5 else rec.get("syms", [None])[0]
-            if label is None:
+        with manifest.open() as f:
+            records = json.load(f)
+
+        img_dir = image_root / split if (image_root / split).exists() else image_root
+
+        for rec in records:
+            fname = rec.get("file_name", "")
+            image_path = img_dir / fname
+            if not image_path.exists():
                 continue
-            boxes.append(
-                (label, (x1 / W, y1 / H, x2 / W, y2 / H))
+            syms: list[str] = rec.get("syms", [])
+            raw_boxes: list[list[int]] = rec.get("boxes", [])
+
+            try:
+                W, H = Image.open(image_path).size
+            except Exception:
+                continue
+
+            boxes: list[tuple[str, tuple[float, float, float, float]]] = []
+            for sym, b in zip(syms, raw_boxes):
+                if len(b) < 4:
+                    continue
+                x1, y1, x2, y2 = b[:4]
+                boxes.append((sym, (x1 / W, y1 / H, x2 / W, y2 / H)))
+
+            yield ChestXDet10Record(
+                image_id=f"chestxdet10_{split}_{fname}",
+                image_path=image_path,
+                boxes=boxes,
             )
-        yield ChestXDet10Record(image_id=image_id, image_path=image_path, boxes=boxes)
 
 
 def annotations_for_record(rec: ChestXDet10Record) -> list[Annotation]:

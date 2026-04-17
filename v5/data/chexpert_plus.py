@@ -47,22 +47,44 @@ class CheXpertPlusRecord:
     view: str
 
 
-def iter_chexpert_plus(root: Path) -> Iterator[CheXpertPlusRecord]:
+DEFAULT_METADATA_CSV = Path.home() / "data" / "claimguard" / "chexpert-plus" / "df_chexpert_plus_240401.csv"
+# Images live at HPC; locally the CSV has path_to_image relative to the CheXpert+ root.
+# Pass image_root=None to accept all rows regardless of image presence (report-only mode).
+
+
+def iter_chexpert_plus(
+    root: Path | None = None,
+    metadata_csv: Path = DEFAULT_METADATA_CSV,
+    require_image: bool = True,
+) -> Iterator[CheXpertPlusRecord]:
+    """Iterate CheXpert Plus records.
+
+    Args:
+        root: Directory containing the images (i.e. ``root/train/patientXXX/...``).
+              If None or image not found, rows are skipped when *require_image* is True.
+        metadata_csv: Path to ``df_chexpert_plus_240401.csv``.
+        require_image: If False, emit records even when the image file is absent
+            (useful for report-only claim extraction on the HPC).
+    """
     import math
 
     import pandas as pd
 
-    csv_path = root / "df_chexpert_plus_240401.csv"
-    df = pd.read_csv(csv_path, low_memory=False)
+    df = pd.read_csv(metadata_csv, low_memory=False)
     for _, row in df.iterrows():
         image_rel = row.get("path_to_image", row.get("Path"))
         if image_rel is None:
             continue
-        image_path = root / image_rel
-        if not image_path.exists():
+        image_path = (root / str(image_rel)) if root is not None else Path(str(image_rel))
+        if require_image and not image_path.exists():
             continue
-        pid = str(row.get("patient_id", image_rel.split("/")[1]))
-        sid = str(row.get("study", image_rel.split("/")[2]))
+
+        # Patient / study IDs from path: train/patient42142/study5/view1_frontal.jpg
+        parts = str(image_rel).replace("\\", "/").split("/")
+        pid = str(row.get("deid_patient_id", parts[1] if len(parts) > 1 else "unknown"))
+        sid = str(row.get("patient_report_date_order", parts[2] if len(parts) > 2 else "unknown"))
+        view = parts[-1].split(".")[0] if parts else "unknown"
+
         labels = {}
         for cls in CHEXPERT_14:
             v = row.get(cls)
@@ -73,15 +95,20 @@ def iter_chexpert_plus(root: Path) -> Iterator[CheXpertPlusRecord]:
                     labels[cls] = float(v)
                 except (TypeError, ValueError):
                     labels[cls] = float("nan")
+
+        # Report: prefer section columns, fall back to monolithic 'report' column.
+        findings = str(row.get("section_findings", row.get("report", "")) or "").strip()
+        impression = str(row.get("section_impression", "") or "").strip()
+
         yield CheXpertPlusRecord(
-            image_id=f"{pid}_{sid}_{row.get('view', 'unknown')}",
+            image_id=f"{pid}_{sid}_{view}",
             patient_id=pid,
             study_id=sid,
             image_path=image_path,
-            report_findings=str(row.get("section_findings", "") or ""),
-            report_impression=str(row.get("section_impression", "") or ""),
+            report_findings=findings,
+            report_impression=impression,
             chexpert_labels=labels,
-            view=str(row.get("view", "unknown")),
+            view=view,
         )
 
 
