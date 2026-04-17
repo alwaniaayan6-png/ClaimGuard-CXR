@@ -91,7 +91,7 @@ def _cohen_kappa(y_true: list[int], y_pred: list[int]) -> float:
     gpu="H100",
     timeout=3600 * 3,
     volumes={str(DATA_ROOT): volume},
-    secrets=[modal.Secret.from_name("huggingface-token")],
+    secrets=[modal.Secret.from_name("huggingface", required=False)],
 )
 def run_reader_study() -> dict:
     import torch

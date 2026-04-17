@@ -30,7 +30,7 @@ image = (
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
 
-volume = modal.Volume.from_name("claimguard-data")
+volume = modal.Volume.from_name("claimguard-v5-data")
 
 
 @app.function(image=image, gpu="H100", timeout=60 * 60 * 6, volumes={"/data": volume})

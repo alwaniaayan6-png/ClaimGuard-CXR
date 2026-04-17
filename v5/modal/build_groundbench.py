@@ -45,7 +45,7 @@ image = (
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
 
-volume = modal.Volume.from_name("claimguard-data")
+volume = modal.Volume.from_name("claimguard-v5-data")
 
 secrets: list[modal.Secret] = []
 for name in ("anthropic", "openai"):

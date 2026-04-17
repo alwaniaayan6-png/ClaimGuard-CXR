@@ -91,8 +91,8 @@ def _auc_and_fpr(scores: list[float], labels: list[int]) -> dict:
     timeout=3600 * 6,
     volumes={str(DATA_ROOT): volume},
     secrets=[
-        modal.Secret.from_name("openai-secret"),
-        modal.Secret.from_name("anthropic-secret"),
+        modal.Secret.from_name("openai", required=False),
+        modal.Secret.from_name("anthropic"),
         modal.Secret.from_name("huggingface-token"),
     ],
 )

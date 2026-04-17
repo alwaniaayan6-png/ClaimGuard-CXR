@@ -156,7 +156,7 @@ def _score_rows(
     gpu="H100",
     timeout=3600 * 4,
     volumes={str(DATA_ROOT): volume},
-    secrets=[modal.Secret.from_name("huggingface-token")],
+    secrets=[modal.Secret.from_name("huggingface", required=False)],
 )
 def run_ho_filter() -> dict:
     import torch
