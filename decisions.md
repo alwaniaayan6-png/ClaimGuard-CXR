@@ -515,6 +515,42 @@ produces equal supported-probabilities on V1 and V3, violates the
 this objective by construction.
 
 
+## D35: Path B wave-2 scaffold — loaders, extractor, 4-way dataset, baselines, fairness, DCA, manuscript scaffold
+**Decision:** Expand the Path B package with: (a) five dataset loaders
+(RSNA, SIIM, ChestX-Det10, PadChest-GR, NIH-BBox) returning a uniform
+``GroundedStudy`` schema; (b) an LLM-agnostic claim extractor with a
+StubBackend for tests; (c) a PyTorch ``FourWayTrainingDataset`` that
+yields V1/V2/V3/V4 variants per sample with O(1) image-swap sampling;
+(d) a baselines registry covering majority-class, rule-based, LLM-judge,
+VLM-judge, RadFlag; (e) fairness subgroup-metrics + decision-curve
+analysis modules; (f) ``requirements.txt``, ``pyproject.toml``,
+Dockerfile for reproducible builds; (g) a MANUSCRIPT_PATH_B.md skeleton.
+Total: 78 unit tests passing.
+**Rationale:** Land everything the paper depends on in code so the only
+remaining work is data ingestion (credentialing + Kaggle tokens) and
+real training runs. Lets the next agent session start at the top of the
+training loop instead of re-scaffolding.
+
+
+## D36: Pre-code review (wave 2) caught 4 blockers + 4 non-blocking bugs
+**Decision:** A second Opus pre-flight review on the wave-2 modules
+caught: (1) ChestX-Det10 loader was using bbox rectangles instead of
+polygon segmentation — silently downgrading grounded-IoU; (2)
+PadChest-GR loader returned empty annotations on any schema mismatch,
+no error raised; (3) ``FourWayTrainingDataset._pick_random_other_patient_image``
+rebuilt candidate lists O(n_patients) per ``__getitem__``; (4)
+``LLMJudgeBaseline`` did not strip ``\`\`\`json`` fences before
+``json.loads`` → silent UNCERTAIN floor on every fenced response.
+Non-blocking: NIH-BBox CSV header whitespace + delimiter sniff, RSNA
+missing-file skip, claim extractor parse-failure diagnostics,
+stub-image-loader value-range contract. All fixed; 9 regression tests
+added.
+**Rationale:** The ChestX-Det10 bug alone would have halved IoU on every
+ChestX-Det10 test claim. The LLM-judge fence bug matches the exact
+failure-mode pattern from the v3 sprint silver-grader incident — a
+known class of bug that pre-flight review catches.
+
+
 ## D34: Pre-code review caught 6 fatal/major bugs in Path B scaffold
 **Decision:** After scaffolding Path B code, an Opus self-check review
 agent found: (1) lazy `_text_proj` layer inside `forward()` would miss

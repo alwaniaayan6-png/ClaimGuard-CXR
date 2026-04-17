@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claimguard_nmi"
+version = "0.1.0a0"
+description = "Image-grounded claim-level verification for radiology report generation (Path B)."
+requires-python = ">=3.9"
+readme = "../ARCHITECTURE_PATH_B.md"
+license = {text = "Apache-2.0"}
+authors = [
+  {name = "Aayan Alwani"},
+]
+keywords = ["radiology", "conformal-prediction", "hallucination-detection", "multimodal"]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = [
+  "claimguard_nmi",
+  "claimguard_nmi.baselines",
+  "claimguard_nmi.conformal",
+  "claimguard_nmi.configs",
+  "claimguard_nmi.data",
+  "claimguard_nmi.data.loaders",
+  "claimguard_nmi.eval",
+  "claimguard_nmi.extraction",
+  "claimguard_nmi.fairness",
+  "claimguard_nmi.grounding",
+  "claimguard_nmi.models",
+  "claimguard_nmi.provenance",
+  "claimguard_nmi.training",
+  "claimguard_nmi.utils",
+]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.package-data]
+"claimguard_nmi.configs" = ["*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["claimguard_nmi/tests"]
+pythonpath = ["."]
+addopts = "-ra -q --strict-markers"
+markers = [
+  "gpu: tests that require a GPU (skipped in CI by default)",
+  "slow: integration tests that take > 10s",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]  # line length handled separately
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]

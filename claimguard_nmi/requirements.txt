@@ -1,0 +1,47 @@
+# ClaimGuard Path B — pinned Python dependencies.
+#
+# Pin everything that can silently change model weights or numerics. Use
+# ``pip install -r requirements.txt`` inside the Docker image.
+
+# Core DL
+torch==2.3.1
+transformers==4.42.3
+tokenizers==0.19.1
+sentencepiece==0.2.0
+accelerate==0.31.0
+# Note: transformers==4.40.0 is pinned for the v1-v4 CheXagent trainer;
+# Path B uses 4.42.3 for BiomedCLIP + RoBERTa compatibility. The two
+# pipelines live in different Docker images.
+
+# Numerics + data
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.1
+pandas==2.2.2
+pyarrow==16.1.0
+pyyaml==6.0.1
+
+# Medical image I/O
+pydicom==2.4.4
+pillow==10.3.0
+opencv-python-headless==4.10.0.82
+nibabel==5.2.1
+
+# Experiment tracking / infra
+mlflow==2.14.1
+hydra-core==1.3.2
+omegaconf==2.3.0
+tqdm==4.66.4
+
+# Retrieval (re-used from v1 for institution-disjoint corpora)
+rank-bm25==0.2.2
+faiss-cpu==1.8.0
+
+# Statistics (used by conformal + metrics)
+statsmodels==0.14.2
+
+# Dev / testing
+pytest==8.2.2
+pytest-cov==5.0.0
+black==24.4.2
+ruff==0.5.0
