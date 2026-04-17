@@ -1,0 +1,14 @@
+# v5.1-ground: enable grounding head supervision from MS-CXR.
+defaults:
+  - base
+
+loss:
+  cls: 1.0
+  ground: 0.5
+  consist: 0.0
+  contrast: 0.0
+  uncert: 0.0
+
+train:
+  epochs: 3
+  wandb_run_name: v5_1_ground

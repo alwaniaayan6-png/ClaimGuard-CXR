@@ -1,0 +1,112 @@
+# ClaimGuard-CXR v5 finding ontology
+# Maps dataset-native vocabularies to a unified 23-class finding family.
+# Reviewed by a radiology consultant before production use.
+#
+# Many-to-one mapping allowed; "unmapped" fallback accepted for NO_GT.
+
+unified_classes:
+  - atelectasis
+  - cardiomegaly
+  - consolidation
+  - edema
+  - enlarged_cardiomediastinum
+  - fracture
+  - lung_lesion
+  - lung_opacity
+  - pleural_effusion
+  - pleural_other
+  - pneumonia
+  - pneumothorax
+  - support_device
+  - foreign_object
+  - hernia
+  - infiltration
+  - mass
+  - emphysema
+  - fibrosis
+  - calcification
+  - cavitation
+  - bronchiectasis
+  - no_finding
+
+chexpert_14_to_unified:
+  "Atelectasis": atelectasis
+  "Cardiomegaly": cardiomegaly
+  "Consolidation": consolidation
+  "Edema": edema
+  "Enlarged Cardiomediastinum": enlarged_cardiomediastinum
+  "Fracture": fracture
+  "Lung Lesion": lung_lesion
+  "Lung Opacity": lung_opacity
+  "No Finding": no_finding
+  "Pleural Effusion": pleural_effusion
+  "Pleural Other": pleural_other
+  "Pneumonia": pneumonia
+  "Pneumothorax": pneumothorax
+  "Support Devices": support_device
+
+rsna_pneumonia_to_unified:
+  "Lung Opacity": lung_opacity
+  "Normal": no_finding
+  "No Lung Opacity / Not Normal": unmapped
+
+siim_pneumothorax_to_unified:
+  "Pneumothorax": pneumothorax
+
+object_cxr_to_unified:
+  "foreign_object": foreign_object
+
+chestx_det10_to_unified:
+  "Atelectasis": atelectasis
+  "Calcification": calcification
+  "Consolidation": consolidation
+  "Effusion": pleural_effusion
+  "Emphysema": emphysema
+  "Fibrosis": fibrosis
+  "Fracture": fracture
+  "Mass": mass
+  "Nodule": lung_lesion
+  "Pneumothorax": pneumothorax
+
+# PadChest has 174 labels; abbreviated seed here, full map lives in finding_ontology_v5_padchest.yaml
+padchest_seed_to_unified:
+  "pulmonary edema": edema
+  "cardiomegaly": cardiomegaly
+  "pleural effusion": pleural_effusion
+  "pneumothorax": pneumothorax
+  "consolidation": consolidation
+  "atelectasis": atelectasis
+  "pneumonia": pneumonia
+  "nodule": lung_lesion
+  "mass": mass
+  "hernia": hernia
+  "fibrosis": fibrosis
+  "emphysema": emphysema
+  "calcified granuloma": calcification
+  "central venous catheter": support_device
+  "endotracheal tube": support_device
+  "pacemaker": support_device
+  "normal": no_finding
+
+ms_cxr_to_unified:
+  "Atelectasis": atelectasis
+  "Cardiomegaly": cardiomegaly
+  "Consolidation": consolidation
+  "Edema": edema
+  "Lung Opacity": lung_opacity
+  "Pleural Effusion": pleural_effusion
+  "Pneumonia": pneumonia
+  "Pneumothorax": pneumothorax
+
+finding_family_groups:
+  consolidative: [consolidation, pneumonia, infiltration, lung_opacity]
+  effusive: [pleural_effusion, pleural_other, edema]
+  structural_lesion: [lung_lesion, mass, cavitation, nodule]
+  cardiac: [cardiomegaly, enlarged_cardiomediastinum]
+  air: [pneumothorax, emphysema]
+  skeletal: [fracture]
+  device_foreign: [support_device, foreign_object]
+  chronic: [fibrosis, bronchiectasis, calcification]
+  misc: [atelectasis, hernia, no_finding]
+
+version: "v5.0-seed"

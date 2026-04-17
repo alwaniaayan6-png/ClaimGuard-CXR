@@ -1,0 +1,96 @@
+# Base config for ClaimGuard-CXR v5 (image-grounded).
+# All other configs inherit from this via Hydra `defaults`.
+
+project: claimguard-v5
+version: 5.0.0-dev
+
+paths:
+  repo_root: /Users/aayanalwani/VeriFact
+  verifact_root: /Users/aayanalwani/VeriFact/verifact
+  modal_volume: /data
+  data_root: ${paths.modal_volume}
+  out_root: ${paths.modal_volume}/checkpoints/claimguard_v5
+  wandb_cache: ${paths.modal_volume}/wandb
+  groundbench_root: ${paths.modal_volume}/groundbench_v5
+
+model:
+  image_backbone: microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
+  image_backbone_revision: null   # pin once HF SHA is captured
+  text_backbone: roberta-large
+  text_backbone_revision: null
+  shared_dim: 768
+  fusion_layers: 4
+  fusion_heads: 12
+  fusion_ffn_dim: 3072
+  fusion_dropout: 0.1
+  mc_dropout_p: 0.2
+  num_verdict_classes: 2
+  image_patches_side: 14
+  max_text_tokens: 256
+  freeze_image_layers: 8
+  freeze_text_layers: 16
+  grounding_enabled: true
+  uncertainty_samples: 5
+
+train:
+  batch_size: 32
+  grad_accum: 2
+  epochs: 4
+  lr_encoders: 1.0e-5
+  lr_heads: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  mixed_precision: bf16
+  image_masked_prob: 0.2
+  contrast_prob: 0.5
+  adversarial_ho_filter: false
+  seed: 17
+  use_wandb: true
+  wandb_project: claimguard-v5
+
+loss:
+  cls: 1.0
+  ground: 0.5
+  consist: 0.3
+  contrast: 0.3
+  uncert: 0.1
+  contrast_margin: 0.2
+
+conformal:
+  alphas: [0.01, 0.05, 0.10, 0.20]
+  variants: [inverted, weighted, doubly_robust]
+  feature_columns: [claim_length, age]
+  bootstrap_replicates: 10000
+  apply_provenance_gate: true
+
+datasets:
+  chexpert_plus:
+    root: ${paths.data_root}/chexpert_plus
+  padchest:
+    root: ${paths.data_root}/padchest
+  openi:
+    root: ${paths.data_root}/openi
+  brax:
+    root: ${paths.data_root}/brax
+  ms_cxr:
+    root: ${paths.data_root}/ms_cxr
+  rsna_pneumonia:
+    root: ${paths.data_root}/rsna_pneumonia
+  siim_pneumothorax:
+    root: ${paths.data_root}/siim_acr_pneumothorax
+  object_cxr:
+    root: ${paths.data_root}/object_cxr
+  chestx_det10:
+    root: ${paths.data_root}/chestx_det10
+  anatomy_masks:
+    root: ${paths.data_root}/anatomy_masks_v5
+
+vlm_generators:
+  active: [maira-2, chexagent-8b, medgemma-4b, llava-rad, llama-3.2-11b-vision]
+  temperatures: [0.3, 0.7, 1.0, 1.2]
+  seeds: [101, 202]
+
+budget:
+  phase_cap_usd: 500
+  hard_cap_usd: 2500
+  auto_halt_ratio: 1.10

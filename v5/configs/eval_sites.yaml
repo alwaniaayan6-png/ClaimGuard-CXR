@@ -1,0 +1,39 @@
+# Evaluation site definitions. Each site selects a pair of (cal, test) JSONL
+# manifests inside the GroundBench v5 output.
+
+sites:
+  chexpert_plus:
+    cal: ${paths.groundbench_root}/chexpert_plus/cal.jsonl
+    test: ${paths.groundbench_root}/chexpert_plus/test.jsonl
+    image_root: ${paths.data_root}/chexpert_plus/images
+    notes: primary in-domain
+  openi:
+    cal: ${paths.groundbench_root}/openi/cal.jsonl
+    test: ${paths.groundbench_root}/openi/test.jsonl
+    image_root: ${paths.data_root}/openi/images
+    notes: cross-dataset transfer (silver-heavy)
+  padchest:
+    cal: ${paths.groundbench_root}/padchest/cal.jsonl
+    test: ${paths.groundbench_root}/padchest/test.jsonl
+    image_root: ${paths.data_root}/padchest/images
+    notes: cross-country + cross-language
+  brax:
+    cal: ${paths.groundbench_root}/brax/cal.jsonl
+    test: ${paths.groundbench_root}/brax/test.jsonl
+    image_root: ${paths.data_root}/brax/images
+    notes: cross-country (Brazil), Portuguese-native reports
+  ms_cxr:
+    cal: ${paths.groundbench_root}/ms_cxr/cal.jsonl
+    test: ${paths.groundbench_root}/ms_cxr/test.jsonl
+    image_root: ${paths.data_root}/ms_cxr/images
+    notes: radiologist-drawn bounding boxes as GT
+  rsna_pneumonia:
+    cal: ${paths.groundbench_root}/rsna_pneumonia/cal.jsonl
+    test: ${paths.groundbench_root}/rsna_pneumonia/test.jsonl
+    image_root: ${paths.data_root}/rsna_pneumonia/stage_2_train_images
+    notes: pneumonia-specific radiologist bounding boxes
+  siim_acr:
+    cal: ${paths.groundbench_root}/siim_acr/cal.jsonl
+    test: ${paths.groundbench_root}/siim_acr/test.jsonl
+    image_root: ${paths.data_root}/siim_acr_pneumothorax/images
+    notes: pneumothorax-specific radiologist segmentation masks

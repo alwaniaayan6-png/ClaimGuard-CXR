@@ -1,0 +1,15 @@
+# v5.0-base: sanity run. No grounding, no contrastive, no HO-filter.
+defaults:
+  - base
+
+loss:
+  cls: 1.0
+  ground: 0.0
+  consist: 0.0
+  contrast: 0.0
+  uncert: 0.0
+
+train:
+  epochs: 2
+  adversarial_ho_filter: false
+  wandb_run_name: v5_0_base

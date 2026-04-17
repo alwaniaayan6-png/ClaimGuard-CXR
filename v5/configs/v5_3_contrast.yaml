@@ -1,0 +1,20 @@
+# v5.3-contrast: add contrastive evidence loss.
+defaults:
+  - base
+
+loss:
+  cls: 1.0
+  ground: 0.5
+  consist: 0.3
+  contrast: 0.3
+  uncert: 0.0
+
+train:
+  epochs: 4
+  wandb_run_name: v5_3_contrast
+  adversarial_ho_filter: true
+
+data_mix:
+  real_fraction: 0.5
+  synthetic_fraction: 0.3
+  ms_cxr_fraction: 0.2
