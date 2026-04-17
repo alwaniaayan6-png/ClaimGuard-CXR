@@ -1,0 +1,160 @@
+# Per-dataset configuration for ClaimGuard-Bench-Grounded.
+#
+# Each dataset entry specifies:
+#   - access:            {direct, kaggle, bimcv, stanford-registration, physionet}
+#   - needs_credentialing: bool  (true for PhysioNet, gates dataset out of Path B primary)
+#   - image_root:        env var naming the local image directory
+#   - label_root:        env var naming the local annotation directory
+#   - label_schema:      list of canonical findings this dataset annotates
+#   - image_format:      {png, jpg, dicom}
+#   - split_strategy:    {patient_disjoint, study_disjoint}
+#   - primary / secondary / supplementary
+
+datasets:
+
+  padchest_gr:
+    access: bimcv
+    needs_credentialing: false
+    image_root: CLAIMGUARD_PADCHEST_GR_IMAGES
+    label_root: CLAIMGUARD_PADCHEST_GR_LABELS
+    label_schema:
+      - lung_opacity
+      - pleural_effusion
+      - cardiomegaly
+      - atelectasis
+      - pulmonary_edema
+      - nodule
+      - mass
+      - fibrosis
+      - calcification
+      - support_device
+    image_format: png
+    split_strategy: patient_disjoint
+    role: primary
+    note: "Primary grounded test set. BIMCV data-use request required."
+
+  rsna_pneumonia:
+    access: kaggle
+    needs_credentialing: false
+    image_root: CLAIMGUARD_RSNA_IMAGES
+    label_root: CLAIMGUARD_RSNA_LABELS
+    label_schema:
+      - lung_opacity
+    image_format: dicom
+    split_strategy: patient_disjoint
+    role: primary
+    note: "Pathology-specific grounded test. Kaggle API token required."
+
+  siim_pneumothorax:
+    access: kaggle
+    needs_credentialing: false
+    image_root: CLAIMGUARD_SIIM_IMAGES
+    label_root: CLAIMGUARD_SIIM_LABELS
+    label_schema:
+      - pneumothorax
+    image_format: dicom
+    split_strategy: patient_disjoint
+    role: primary
+    note: "Pathology-specific grounded test. Kaggle API token required."
+
+  chestxdet10:
+    access: direct
+    needs_credentialing: false
+    image_root: CLAIMGUARD_CHESTXDET10_IMAGES
+    label_root: CLAIMGUARD_CHESTXDET10_LABELS
+    label_schema:
+      - lung_opacity
+      - pleural_effusion
+      - cardiomegaly
+      - atelectasis
+      - pulmonary_edema
+      - nodule
+      - mass
+      - pneumothorax
+      - infiltration
+      - fibrosis
+      - calcification
+    image_format: png
+    split_strategy: study_disjoint
+    role: primary
+    note: "10-category grounded eval. GitHub open."
+
+  nih_bbox:
+    access: direct
+    needs_credentialing: false
+    image_root: CLAIMGUARD_NIH_IMAGES
+    label_root: CLAIMGUARD_NIH_BBOX_CSV
+    label_schema:
+      - lung_opacity
+      - pleural_effusion
+      - cardiomegaly
+      - atelectasis
+      - nodule
+      - mass
+      - infiltration
+    image_format: png
+    split_strategy: patient_disjoint
+    role: secondary
+    note: "~1k radiologist boxes on 8 NIH CXR14 classes."
+
+  object_cxr:
+    access: direct
+    needs_credentialing: false
+    image_root: CLAIMGUARD_OBJECT_CXR_IMAGES
+    label_root: CLAIMGUARD_OBJECT_CXR_LABELS
+    label_schema:
+      - support_device
+      - foreign_object
+    image_format: jpg
+    split_strategy: study_disjoint
+    role: secondary
+    note: "Foreign-object boxes. MIDL 2020."
+
+  chexpert_plus:
+    access: stanford-registration
+    needs_credentialing: false
+    image_root: CLAIMGUARD_CHEXPERT_PLUS_IMAGES
+    label_root: CLAIMGUARD_CHEXPERT_PLUS_REPORTS
+    label_schema: []   # no grounded annotations; reports only
+    image_format: jpg
+    split_strategy: patient_disjoint
+    role: training_source
+    note: "Training source. In-distribution eval only."
+
+  openi:
+    access: direct
+    needs_credentialing: false
+    image_root: CLAIMGUARD_OPENI_IMAGES
+    label_root: CLAIMGUARD_OPENI_REPORTS
+    label_schema: []
+    image_format: png
+    split_strategy: patient_disjoint
+    role: text_only_ood
+    note: "Text-only OOD robustness check."
+
+# Bonus datasets unlocked only if PhysioNet credentialing lands.
+supplementary_credentialed:
+
+  ms_cxr:
+    access: physionet
+    needs_credentialing: true
+    role: supplementary
+    note: "1,162 phrase-grounded boxes. PhysioNet-credentialed access required."
+
+  chexmask:
+    access: physionet
+    needs_credentialing: true
+    role: supplementary
+    note: "CC-BY-4.0 masks but source images are credentialed for MIMIC/CheXpert."
+
+  rexval:
+    access: physionet
+    needs_credentialing: true
+    role: supplementary
+    note: "6-radiologist error annotations on 50 AI-generated reports."
+
+  rexerr:
+    access: physionet
+    needs_credentialing: true
+    role: supplementary
+    note: "Radiologist-labeled errors on AI-generated CXR reports."

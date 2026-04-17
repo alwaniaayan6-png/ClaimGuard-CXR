@@ -1,0 +1,152 @@
+# Canonical finding ontology for ClaimGuard-Bench-Grounded
+#
+# Every dataset's native label schema maps into this canonical set.
+# A claim whose finding does NOT map to any canonical key is marked
+# UNGROUNDED and excluded from headline tables.
+#
+# Categories:
+#   - focal:      localizable, IoU-testable
+#   - diffuse:    whole-lung / whole-mediastinum, size-ratio-tested
+#   - device:     foreign object, localizable
+#   - artifactual: not a pathology but commonly asserted in VLM outputs
+#
+# Each entry has:
+#   canonical_id:      stable key used in code
+#   category:          {focal, diffuse, device, artifactual}
+#   common_names:      list of surface-form strings that map to this id
+#   datasets:          which datasets carry annotations for this finding
+
+canonical_findings:
+
+  lung_opacity:
+    category: focal
+    common_names:
+      - lung opacity
+      - opacity
+      - pulmonary opacity
+      - airspace opacity
+      - consolidation
+      - airspace disease
+      - alveolar pattern
+      - patron alveolar pulmonar  # PadChest Spanish
+    datasets: [PadChest-GR, RSNA, ChestX-Det10, NIH-BBox]
+
+  pneumothorax:
+    category: focal
+    common_names:
+      - pneumothorax
+      - ptx
+      - collapsed lung
+    datasets: [SIIM, PadChest-GR, ChestX-Det10]
+
+  pleural_effusion:
+    category: focal  # localizable when unilateral; diffuse if bilateral
+    common_names:
+      - pleural effusion
+      - effusion
+      - hydrothorax
+      - derrame pleural
+    datasets: [PadChest-GR, ChestX-Det10, NIH-BBox]
+
+  cardiomegaly:
+    category: diffuse
+    common_names:
+      - cardiomegaly
+      - enlarged cardiac silhouette
+      - cardiac enlargement
+      - cardiomegalia
+    datasets: [PadChest-GR, ChestX-Det10, NIH-BBox]
+
+  atelectasis:
+    category: focal
+    common_names:
+      - atelectasis
+      - volume loss
+      - collapse
+      - atelectasia
+    datasets: [PadChest-GR, ChestX-Det10, NIH-BBox]
+
+  pulmonary_edema:
+    category: diffuse
+    common_names:
+      - pulmonary edema
+      - interstitial edema
+      - edema pulmonar
+    datasets: [PadChest-GR, ChestX-Det10]
+
+  nodule:
+    category: focal
+    common_names:
+      - nodule
+      - pulmonary nodule
+      - solitary pulmonary nodule
+      - nodulo
+    datasets: [PadChest-GR, ChestX-Det10, NIH-BBox]
+
+  mass:
+    category: focal
+    common_names:
+      - mass
+      - pulmonary mass
+      - masa pulmonar
+    datasets: [PadChest-GR, ChestX-Det10, NIH-BBox]
+
+  infiltration:
+    category: focal
+    common_names:
+      - infiltrate
+      - infiltration
+      - infiltrado
+    datasets: [NIH-BBox, ChestX-Det10]
+
+  fibrosis:
+    category: diffuse
+    common_names:
+      - fibrosis
+      - pulmonary fibrosis
+      - fibrosis pulmonar
+    datasets: [PadChest-GR, ChestX-Det10]
+
+  calcification:
+    category: focal
+    common_names:
+      - calcification
+      - calcified nodule
+      - calcificacion
+    datasets: [PadChest-GR, ChestX-Det10]
+
+  # Devices (Object-CXR + PadChest-GR)
+  support_device:
+    category: device
+    common_names:
+      - support device
+      - tube
+      - line
+      - catheter
+      - endotracheal tube
+      - central venous catheter
+      - chest tube
+    datasets: [Object-CXR, PadChest-GR]
+
+  foreign_object:
+    category: device
+    common_names:
+      - foreign object
+      - foreign body
+      - artifact
+    datasets: [Object-CXR]
+
+# Claim types that CANNOT be grounded against a still-image annotation.
+# These are returned as UNGROUNDED from the grounding logic.
+ungroundable_claim_types:
+  - prior_comparison          # "stable compared to prior", "increased since"
+  - measurement_fabrication   # "3 mm nodule", "1.2 cm mass"
+  - implicit_global_negation  # "lungs are clear" — evaluated only when dataset labels all pathologies
+  - hedge                     # "possible ...", "cannot exclude ..."
+  - global_description        # "mediastinal contours normal"
+
+# Diffuse findings — use size-ratio match instead of IoU.
+diffuse_findings_override:
+  - cardiomegaly
+  - pulmonary_edema
+  - fibrosis

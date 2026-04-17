@@ -468,3 +468,65 @@ taxonomy expansion (8 → 12 perturbation types) made the artifact
 STRONGER because more perturbation types = more lexical patterns =
 more shortcuts.  This is a directly measurable failure mode of
 synthetic-only training paradigms.
+
+
+## D31: Pivot to Path B — image-grounded claim verification (2026-04-17)
+**Decision:** Pivot the paper from text-only synthetic-negative training
+to an **image-grounded** claim verifier evaluated against
+radiologist-drawn pixel annotations. Replace "silver-standard LLM-ensemble
+labels" with "radiologist bounding boxes / segmentation masks" as ground
+truth. Target venue shifts from NeurIPS D&B to npj Digital Medicine /
+Medical Image Analysis (primary) or Nature Machine Intelligence
+(stretch, contingent on radiology co-author + PhysioNet credentialing).
+**Rationale:** v4's negative HO gap on synthetic data (−2.61 pp) shows
+the model does not use evidence; the paper cannot claim evidence-grounded
+reasoning on synthetic data alone. Anchoring ground truth in pixels
+radiologists drew on removes the text-vs-text circularity that a
+Nature-family reviewer would flag. Details: `ARCHITECTURE_PATH_B.md`.
+
+
+## D32: Path B dataset mix — drop PhysioNet-credentialed datasets from headline
+**Decision:** Drop MS-CXR, CheXmask source images, MIMIC-CXR,
+VinDr-CXR, ReXVal, ReXErr, RadGraph-XL from the primary evaluation
+because they require PhysioNet credentialing. Primary datasets: PadChest-GR
+(BIMCV), RSNA Pneumonia (Kaggle), SIIM-ACR (Kaggle), ChestX-Det10 (GitHub),
+NIH CXR14 BBox subset, Object-CXR. PhysioNet-bound datasets reserved as
+supplementary if credentialing lands in parallel.
+**Rationale:** The user cannot hold a PhysioNet credential personally
+(HS student, age + institutional-affiliation requirements) and cannot
+assume Laughney will file on our timeline. Feasibility review caught
+v1 draft's incorrect claim that MS-CXR lives on HuggingFace; correcting
+this forced the scope change.
+
+
+## D33: Four-way contrastive training objective (V1/V2/V3/V4)
+**Decision:** Replace the v1 draft's 3-variant evidence-contrastive loss
+with a 4-variant objective that includes **image-swap negatives**:
+V1 (supp evidence + correct image, label 0), V2 (contra evidence +
+correct image, label 1), V3 (supp evidence + RANDOM-PATIENT image,
+label 1), V4 (supp evidence + zero-image, label 1).
+**Rationale:** Review caught that the v1 loss was gameable — a text-only
+model can learn the lexical signature of `evidence_supp` vs
+`evidence_contra` and satisfy the evidence margin without looking at the
+image. Adding V3 (image-swap) means the text is identical between V1 and
+V3 but the label differs; therefore any model that ignores the image
+produces equal supported-probabilities on V1 and V3, violates the
+`img_margin` term, and cannot minimize the loss. The HO baseline fails
+this objective by construction.
+
+
+## D34: Pre-code review caught 6 fatal/major bugs in Path B scaffold
+**Decision:** After scaffolding Path B code, an Opus self-check review
+agent found: (1) lazy `_text_proj` layer inside `forward()` would miss
+optimizer registration; (2) `_freeze_except_last_n` silently left the
+whole image encoder frozen when the attribute path resolution failed;
+(3) `WeightedCfBH` recomputed calibration weights per test point (100×
+perf hit); (4) `bootstrap_ci` closure bug — y_pred was not being
+resampled with y_true, so CIs were meaningless; (5) `_auroc` fallback
+computed `1 - AUROC` due to a mis-written argsort permutation; (6)
+`FourWayContrastiveLoss` double-counted V4 (effective weight
+`lambda_ce + lambda_mask = 1.05` instead of `lambda_mask = 0.05`). All
+fixed before any Modal launch. Regression tests added for each.
+**Rationale:** Doc-sync + pre-flight review pattern from the v3 sprint
+caught all 6 bugs in one review pass. Each would have wasted GPU hours
+or produced invalid metrics. Documenting here to preserve the catch.

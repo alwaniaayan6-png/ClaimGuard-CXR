@@ -1,0 +1,55 @@
+# Image-grounded verifier config.
+
+model:
+  name: claimguard_image_grounded
+  text_encoder:
+    hf_name: roberta-large
+    hf_revision: e04429a                 # pin exact commit hash; update if rebuilding
+    hidden_size: 1024
+    pooling: mean
+    shared_weights_for_claim_and_evidence: true
+  image_encoder:
+    hf_name: microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
+    hf_revision: 9c04b2e
+    unfrozen_last_n_layers: 4
+    image_size: 224
+    patch_size: 16
+  cross_attn:
+    n_layers: 4
+    n_heads: 8
+    hidden_size: 1024
+    dropout: 0.1
+  roi_attention:
+    use_soft_region_prior: true          # v2 fix: soft, not hard
+    prior_strength: 1.5                  # additive logit bias for prior-aligned patches
+  heads:
+    verdict: {n_classes: 2}
+    score: {}                            # sigmoid
+    uncertainty:
+      method: mc_dropout
+      dropout_rate: 0.1
+      n_samples: 10
+
+training:
+  loss:
+    lambda_ce: 1.0
+    lambda_evi_contrast: 0.3
+    lambda_img_contrast: 0.3              # v2 fix: image-swap pathway has its own margin
+    lambda_img_mask: 0.05                 # diagnostic only
+    margin_evi: 0.2
+    margin_img: 0.2
+  optimizer:
+    name: adamw
+    lr: 2.0e-5
+    weight_decay: 0.01
+  batch:
+    per_gpu: 16
+    grad_accum: 4                         # effective 64
+  epochs: 3
+  seeds: [13, 17, 19]                    # 3-seed deep ensemble for headline
+  early_stop: {patience: 1, metric: val_loss}
+  adversarial_ho_filter:
+    enabled: true
+    ho_baseline_seeds: [101, 103, 107]
+    drop_threshold_prob: 0.9
+    n_iterations: 2

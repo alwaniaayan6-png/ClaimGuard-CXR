@@ -1,6 +1,13 @@
 # ClaimGuard-CXR: Claim-Level Verification and Conformal False Discovery Rate Control for Radiology Report Generation
 
-**Target venue:** NeurIPS 2026 main conference (deadline: May 6, 2026)
+**Target venue (v2 pivot, 2026-04-17):** npj Digital Medicine or Medical Image Analysis (primary); Nature Communications (stretch); Nature Machine Intelligence (only if radiology co-author + PhysioNet credentialing land).
+
+Historical target (v1): NeurIPS 2026 main conference. The v4 sprint (2026-04-15) completed enough of the text-only pipeline to ship a workshop paper, but the HO-gap result and "silver-standard" grounding means the text-only story cannot reach a Nature-family venue. See `ARCHITECTURE_PATH_B.md` for the image-grounded pivot that replaces this proposal's V1 framing.
+
+**V2 addendum (Path B, 2026-04-17):** The primary contribution is now an open-data, multi-site, image-grounded claim-level hallucination benchmark (ClaimGuard-Bench-Grounded) plus an image-grounded claim verifier with a four-way contrastive training objective that provably defeats the hypothesis-only shortcut. Sections below referencing CheXpert-synthetic accuracy and text-only evaluation are retained as historical record of the v1 work; the authoritative design is `ARCHITECTURE_PATH_B.md`.
+
+---
+
 **Format:** 9 pages content + unlimited references/appendix
 
 ---
