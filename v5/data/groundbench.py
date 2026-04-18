@@ -55,6 +55,7 @@ class GroundBenchRow:
     age: float | None = None
     scanner_manufacturer: str | None = None
     country: str | None = None
+    grounding_bbox: list[float] | None = None  # [x1, y1, x2, y2] normalized 0-1; None if no pixel GT
 
 
 @dataclass
@@ -78,10 +79,46 @@ def assemble_row(
     scanner_manufacturer: str | None = None,
     country: str | None = None,
     matcher: ClaimMatcher | None = None,
+    synthesized_gt: str | None = None,
+    synthesized_bbox: tuple[float, float, float, float] | None = None,
 ) -> GroundBenchRow:
-    matcher = matcher or ClaimMatcher()
-    result: MatchResult = matcher.match(structured, annotations, anatomy)
+    """Assemble a single GroundBench row.
+
+    When `synthesized_gt` is provided (e.g., "SUPPORTED" or "CONTRADICTED"),
+    the GT label is taken directly from that value and the claim matcher is
+    NOT consulted. This is the path used for claims synthesized deterministically
+    from annotations, where ground truth is known by construction and the
+    matcher's ontology/anatomy logic would spuriously re-label (or drop) them.
+    Callers that pass synthesized_gt may also pass synthesized_bbox — a
+    normalized (x1,y1,x2,y2) bounding box — to populate the grounding target.
+    """
     image_id = anatomy.image_id if anatomy is not None else structured.report_id
+
+    if synthesized_gt is not None:
+        gt_label = synthesized_gt
+        matching_annotation_id = None
+        spatial_overlap = 1.0 if synthesized_bbox is not None else 0.0
+        matcher_reason = "synthesized_from_annotation"
+        gt_coverage = True
+        grounding_bbox = synthesized_bbox
+    else:
+        matcher = matcher or ClaimMatcher()
+        result: MatchResult = matcher.match(structured, annotations, anatomy)
+        gt_label = result.label.value
+        matching_annotation_id = result.matching_annotation_id
+        spatial_overlap = result.spatial_overlap
+        matcher_reason = result.reason
+        gt_coverage = result.coverage
+        grounding_bbox = None
+        # If the matcher found a box-bearing annotation, carry its bbox as
+        # grounding target for the grounding loss.
+        if result.matching_annotation_id is not None:
+            for ann in annotations:
+                ann_id = getattr(ann, "annotation_id", None) or ann.image_id
+                if ann_id == result.matching_annotation_id and ann.bbox is not None:
+                    grounding_bbox = ann.bbox
+                    break
+
     return GroundBenchRow(
         image_id=image_id,
         image_path=str(image_path),
@@ -89,11 +126,11 @@ def assemble_row(
         claim_id=structured.claim_id,
         claim_text=structured.raw_text,
         claim_struct=structured.to_dict(),
-        gt_label=result.label.value,
-        gt_coverage=result.coverage,
-        matching_annotation_id=result.matching_annotation_id,
-        spatial_overlap=result.spatial_overlap,
-        matcher_reason=result.reason,
+        gt_label=gt_label,
+        gt_coverage=gt_coverage,
+        matching_annotation_id=matching_annotation_id,
+        spatial_overlap=spatial_overlap,
+        matcher_reason=matcher_reason,
         evidence_text=evidence_text,
         evidence_source_type=structured.evidence_source_type,
         evidence_trust_tier="trusted" if structured.evidence_source_type == "oracle_human" else "unknown",
@@ -106,6 +143,7 @@ def assemble_row(
         age=age,
         scanner_manufacturer=scanner_manufacturer,
         country=country,
+        grounding_bbox=list(grounding_bbox) if grounding_bbox is not None else None,
     )
 
 

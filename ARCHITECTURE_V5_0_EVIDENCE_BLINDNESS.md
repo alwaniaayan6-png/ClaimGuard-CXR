@@ -676,7 +676,17 @@ All 11 pre-flight bugs fixed 2026-04-17. Status is reproduced here for the recor
 | 10 | `v5/configs/base.yaml` | `hard_cap_usd: 2500` (should be 900) | ✅ Fixed | `hard_cap_usd: 900`, `phase_cap_usd: 200`. |
 | 11 | `v5/data/groundbench.py` | `assemble_row` uses wrong `image_id` fallback when anatomy is None | ✅ Fixed | Simplified to `anatomy.image_id if anatomy is not None else structured.report_id`. |
 
-Second pre-flight review owed before Modal launch to confirm the fixes are integration-correct (tests only verify unit-level behaviour).
+First pre-flight review (2026-04-17, agent 4c) returned **DO-NOT-LAUNCH** and flagged 3 additional integration-level blockers and 2 majors that the initial 11-bug fix missed:
+
+| # | File | Issue | Status |
+|---|---|---|---|
+| B1 | `v5/data/groundbench.py` + `v5/data/claim_synthesizer.py` | Synthesizer-assigned GT labels were silently overwritten by the claim matcher (which uses modifier-tag semantics the synthesizer didn't produce), causing every synthesized negative row to become `NO_GT` and be dropped by `GroundBenchDataset`. | ✅ Fixed — `assemble_row` now accepts `synthesized_gt` that bypasses the matcher. |
+| B2 | `v5/data/claim_synthesizer.py` | Detection-only sites produced zero CONTRADICTED claims (synthesizer emitted only positive-present + negative-absent, both SUPPORTED). Left the benchmark with a severe label imbalance on those sites. | ✅ Fixed — new `emit_contradicted_positives=True` path emits "There is {X}" claims about absent findings with GT=CONTRADICTED. |
+| B3 | `v5/train.py` | Dataset never emitted `grounding_target`/`grounding_mask`; train loop passed `None`; grounding loss silently zeroed across every batch and every config despite v5.1-v5.4 setting `ground=0.5`. | ✅ Fixed — `GroundBenchDataset.__getitem__` now projects `grounding_bbox` from the JSONL row onto a 14×14 binary patch mask and returns per-row `grounding_target` + `grounding_mask` tensors. Train loop plumbs them through. `assemble_row` populates `grounding_bbox` from the matched annotation. |
+| M1 | `v5/modal/ho_filter.py` (new) | HO filter ran inline inside `train_v5()` → risked blowing past the 4h Modal timeout (filter train + full multimodal train can exceed 4h combined). Also recomputed per config. | ✅ Fixed — extracted to standalone Modal entrypoint `v5/modal/ho_filter.py`. Training reads the shared `/data/groundbench_v5/ho_filter_weights.jsonl`. Run once, reuse across v5.2/v5.3/v5.4. |
+| M2 | `v5/train.py` | HO-filter per-example weights shift the loss composition (cls term shrinks relative to others). No visibility into whether cls is being drowned out by non-weighted terms. | ✅ Fixed — wandb now logs `cls_fraction_of_total` and `batch_weight_mean` per step. |
+
+Second pre-flight review required before Modal launch to confirm all blocker/major fixes are integration-correct.
 
 ---
 

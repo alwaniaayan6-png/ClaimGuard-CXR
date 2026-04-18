@@ -197,9 +197,9 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
                 summary_counts["claims"] += 1
         elif site in {"rsna_pneumonia", "siim_acr", "object_cxr", "chestx_det10"} and annotations:
             # Detection-only sites: synthesize claims deterministically from
-            # the bounding-box/mask labels. One positive claim per annotation,
-            # plus one negative claim per image sampled from absent findings
-            # in the site's taxonomy.
+            # the bounding-box/mask labels. GT labels come from the annotations
+            # themselves — the matcher is NOT consulted (it would spuriously
+            # re-label or drop these claims).
             try:
                 anatomy = compute_anatomy_masks(rec.image_path)
             except Exception as exc:  # noqa: BLE001
@@ -211,8 +211,24 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
                 source=site,
                 all_findings_in_site=default_site_findings(site),
                 emit_negatives=True,
+                emit_contradicted_positives=True,
             )
+            # Map annotation's finding -> first bbox (for grounding target).
+            bbox_by_finding = {
+                ann.finding: tuple(ann.bbox)
+                for ann in annotations
+                if ann.bbox is not None
+            }
             for sc in synth_claims:
+                # For SUPPORTED positive-assertion claims, attach the bbox of
+                # the matching annotation. For CONTRADICTED or negative claims,
+                # no grounding target (the claim's spatial target is absent).
+                synth_bbox = None
+                if (
+                    sc.gt_label == "SUPPORTED"
+                    and "negative" not in sc.structured.modifier_tags
+                ):
+                    synth_bbox = bbox_by_finding.get(sc.structured.finding)
                 row = assemble_row(
                     sc.structured,
                     annotations,
@@ -226,6 +242,8 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
                     scanner_manufacturer=scanner,
                     country=country,
                     matcher=matcher,
+                    synthesized_gt=sc.gt_label,
+                    synthesized_bbox=synth_bbox,
                 )
                 rows.append(row)
                 summary_counts["claims"] += 1

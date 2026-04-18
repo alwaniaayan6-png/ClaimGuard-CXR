@@ -106,6 +106,13 @@ def train_v5_run(config_name: str) -> dict:
         image_masked_prob=cfg_dict["train"]["image_masked_prob"],
         contrast_prob=cfg_dict["train"]["contrast_prob"],
         adversarial_ho_filter=cfg_dict["train"]["adversarial_ho_filter"],
+        # Shared HO-filter weights: precomputed once via v5/modal/ho_filter.py
+        # and reused across v5.2/v5.3/v5.4 to avoid recomputing per training run.
+        ho_filter_weights_path=(
+            P(cfg_dict["paths"]["groundbench_root"]) / "ho_filter_weights.jsonl"
+            if cfg_dict["train"]["adversarial_ho_filter"]
+            else None
+        ),
         seed=cfg_dict["train"]["seed"],
         loss_weights=lw,
         use_wandb=cfg_dict["train"]["use_wandb"],

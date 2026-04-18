@@ -176,16 +176,40 @@ class GroundBenchDataset(Dataset):
         image = self._load_image(row["image_path"])
         enc = self._encode_text(row["claim_text"], row.get("evidence_text"))
         label = 1 if row["gt_label"] == "CONTRADICTED" else 0
-        out = {
+
+        # Grounding target: project normalized [x1,y1,x2,y2] bbox onto the 14x14
+        # patch grid. If no bbox is available, emit a zero target and set the
+        # mask to False so the loss is not applied on this row.
+        side = 14
+        grounding_target = torch.zeros((side, side), dtype=torch.float32)
+        grounding_mask = torch.tensor(False, dtype=torch.bool)
+        bbox = row.get("grounding_bbox")
+        if bbox is not None and len(bbox) == 4:
+            x1, y1, x2, y2 = bbox
+            # Clamp to [0,1] and project to patch-grid integer coordinates.
+            x1 = max(0.0, min(1.0, float(x1)))
+            y1 = max(0.0, min(1.0, float(y1)))
+            x2 = max(0.0, min(1.0, float(x2)))
+            y2 = max(0.0, min(1.0, float(y2)))
+            if x2 > x1 and y2 > y1:
+                c1 = int(round(x1 * side))
+                r1 = int(round(y1 * side))
+                c2 = int(round(x2 * side))
+                r2 = int(round(y2 * side))
+                c2 = max(c2, c1 + 1)
+                r2 = max(r2, r1 + 1)
+                grounding_target[r1:r2, c1:c2] = 1.0
+                grounding_mask = torch.tensor(True, dtype=torch.bool)
+
+        return {
             "pixel_values": image,
             "input_ids": enc["input_ids"],
             "attention_mask": enc["attention_mask"],
             "labels": torch.tensor(label, dtype=torch.long),
             "weight": torch.tensor(self.weights[idx], dtype=torch.float32),
+            "grounding_target": grounding_target,
+            "grounding_mask": grounding_mask,
         }
-        # Optionally attach grounding target if bbox/mask is carried in the row.
-        # (handled at collate stage via a sidecar channel; elided here for brevity)
-        return out
 
 
 def _build_optimizer(model: ImageGroundedVerifier, cfg: V5TrainConfig) -> AdamW:
@@ -409,6 +433,13 @@ def train_v5(cfg: V5TrainConfig, model_cfg: V5Config | None = None) -> list[Epoc
                 if example_weights is not None:
                     example_weights = example_weights.to(device, non_blocking=True)
 
+                grounding_target = batch.get("grounding_target")
+                grounding_mask = batch.get("grounding_mask")
+                if grounding_target is not None:
+                    grounding_target = grounding_target.to(device, non_blocking=True)
+                if grounding_mask is not None:
+                    grounding_mask = grounding_mask.to(device, non_blocking=True)
+
                 loss_out: LossOutput = total_loss(
                     weights=cfg.loss_weights,
                     verdict_logits_full=out_full["verdict_logits"],
@@ -417,8 +448,8 @@ def train_v5(cfg: V5TrainConfig, model_cfg: V5Config | None = None) -> list[Epoc
                     support_score_mismatched=score_mis,
                     labels=y,
                     grounding_logits=out_full.get("grounding_logits"),
-                    grounding_target=None,  # populated when MS-CXR rows are in-batch; elided here
-                    grounding_mask=None,
+                    grounding_target=grounding_target,
+                    grounding_mask=grounding_mask,
                     uncertainty_mc_probs=uncertainty_mc_probs,
                     example_weights=example_weights,
                 )
@@ -444,6 +475,13 @@ def train_v5(cfg: V5TrainConfig, model_cfg: V5Config | None = None) -> list[Epoc
                 try:
                     import wandb
 
+                    # Compose the cls-vs-total ratio so we can catch when HO
+                    # filter downweighting shifts the loss balance away from
+                    # classification — see pre-flight concern 14.
+                    total_val = max(float(loss_out.total.detach()), 1e-9)
+                    cls_frac = float(loss_out.cls.detach()) / total_val
+                    batch_weight_mean = float(example_weights.mean().item()) if example_weights is not None else 1.0
+
                     wandb.log(
                         {
                             "train/loss": float(loss_out.total.detach()),
@@ -452,6 +490,8 @@ def train_v5(cfg: V5TrainConfig, model_cfg: V5Config | None = None) -> list[Epoc
                             "train/consist": float(loss_out.consist.detach()),
                             "train/contrast": float(loss_out.contrast.detach()),
                             "train/uncert": float(loss_out.uncert.detach()),
+                            "train/cls_fraction_of_total": cls_frac,
+                            "train/batch_weight_mean": batch_weight_mean,
                             "train/lr_encoders": optimizer.param_groups[0]["lr"],
                             "train/lr_heads": optimizer.param_groups[1]["lr"],
                             "step": step_global,

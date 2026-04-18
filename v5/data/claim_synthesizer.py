@@ -80,9 +80,18 @@ def synthesize_claims_for_image(
     location_for_finding: dict[str, str] | None = None,
     all_findings_in_site: list[str] | None = None,
     emit_negatives: bool = True,
+    emit_contradicted_positives: bool = True,
     seed: int = 17,
 ) -> list[SynthesizedClaim]:
-    """Produce one positive claim per annotation; optionally one negative claim per image.
+    """Produce claims from annotations in three flavors:
+
+    - Positive assertion, finding present: "There is {X} in the {lat} {loc}."
+      where X is present on the image → GT = SUPPORTED.
+    - Negative assertion, finding absent: "There is no {X} in the {loc}."
+      where X is absent on the image → GT = SUPPORTED (the negation is true).
+    - Positive assertion, finding absent: "There is {X} in the {loc}." where
+      X is ABSENT on the image → GT = CONTRADICTED. This is the critical
+      class that gives detection-only sites non-zero CONTRADICTED training data.
 
     Args:
         image_id: stable identifier for the image (becomes report_id).
@@ -91,14 +100,16 @@ def synthesize_claims_for_image(
         location_for_finding: optional override mapping finding -> anatomical
             location string (e.g., pneumothorax -> pleural_space). If None,
             "lung" is used as a generic fallback.
-        all_findings_in_site: sample negative claims from findings in this list
-            that are absent on the image. Required when emit_negatives=True.
-        emit_negatives: whether to emit a negative claim (default True).
-        seed: RNG seed for negative-finding selection.
+        all_findings_in_site: sample negative/contradicted claims from findings
+            in this list that are absent on the image. Required when either
+            negative flag is True.
+        emit_negatives: whether to emit a "there is no X" claim (GT=SUPPORTED).
+        emit_contradicted_positives: whether to emit a "there is X" assertion
+            about an absent finding (GT=CONTRADICTED).
+        seed: RNG seed for finding selection.
 
     Returns:
-        List of SynthesizedClaim. Empty if annotations is empty and no
-        negative is emitted.
+        List of SynthesizedClaim. Empty if no annotations and no negatives.
     """
     rng = random.Random(f"{source}:{image_id}:{seed}")
     out: list[SynthesizedClaim] = []
@@ -135,26 +146,61 @@ def synthesize_claims_for_image(
         )
         out.append(SynthesizedClaim(structured=structured, gt_label="SUPPORTED"))
 
-    if emit_negatives and all_findings_in_site:
-        absent = [f for f in all_findings_in_site if f not in present_findings]
-        if absent:
-            neg = rng.choice(absent)
-            loc = location_for_finding.get(neg, _location_phrase("lung"))
-            finding_phrase = _finding_phrase(neg)
-            raw = f"There is no {finding_phrase} in the {loc}."
-            claim_id = stable_id("synth", source, image_id, neg, "-", "neg")
+    absent_findings: list[str] = []
+    if all_findings_in_site:
+        absent_findings = [f for f in all_findings_in_site if f not in present_findings]
+
+    if emit_negatives and absent_findings:
+        neg = rng.choice(absent_findings)
+        loc = location_for_finding.get(neg, _location_phrase("lung"))
+        finding_phrase = _finding_phrase(neg)
+        raw = f"There is no {finding_phrase} in the {loc}."
+        claim_id = stable_id("synth", source, image_id, neg, "-", "neg")
+        structured = StructuredClaim(
+            claim_id=claim_id,
+            raw_text=raw,
+            report_id=image_id,
+            finding=neg,
+            finding_family=_FINDING_FAMILY.get(neg, "unknown"),
+            location=loc,
+            laterality="unknown",
+            severity="unknown",
+            temporality="unknown",
+            comparison="absent",
+            modifier_tags=["synthesized", "negative", "polarity_negated"],
+            evidence_source_type="annotation_synthesized",
+            generator_id=f"synth:{source}",
+            generator_temperature=None,
+            generator_seed=seed,
+            parser_confidence=1.0,
+            parser_version=PROMPT_VERSION,
+        )
+        # "no X" when X is absent → claim is true → SUPPORTED
+        out.append(SynthesizedClaim(structured=structured, gt_label="SUPPORTED"))
+
+    if emit_contradicted_positives and absent_findings:
+        # Pick a DIFFERENT absent finding from the "no X" negation above (if
+        # both emit, avoid using the same finding twice with conflicting logic).
+        pool = [f for f in absent_findings if not (emit_negatives and len(absent_findings) > 1 and f == neg)] \
+            if emit_negatives else absent_findings
+        if pool:
+            con = rng.choice(pool)
+            loc = location_for_finding.get(con, _location_phrase("lung"))
+            finding_phrase = _finding_phrase(con)
+            raw = f"There is {finding_phrase} in the {loc}."
+            claim_id = stable_id("synth", source, image_id, con, "-", "contra")
             structured = StructuredClaim(
                 claim_id=claim_id,
                 raw_text=raw,
                 report_id=image_id,
-                finding=neg,
-                finding_family=_FINDING_FAMILY.get(neg, "unknown"),
+                finding=con,
+                finding_family=_FINDING_FAMILY.get(con, "unknown"),
                 location=loc,
                 laterality="unknown",
                 severity="unknown",
                 temporality="unknown",
-                comparison="absent",
-                modifier_tags=["synthesized", "negative"],
+                comparison="present",
+                modifier_tags=["synthesized"],
                 evidence_source_type="annotation_synthesized",
                 generator_id=f"synth:{source}",
                 generator_temperature=None,
@@ -162,14 +208,8 @@ def synthesize_claims_for_image(
                 parser_confidence=1.0,
                 parser_version=PROMPT_VERSION,
             )
-            # GT for a "no X" claim on an image where X is absent: SUPPORTED
-            # (the claim is true). If X were present, GT would be CONTRADICTED.
-            # Since we only pick `neg` from the absent set, the claim is true
-            # and GT is SUPPORTED. We still emit it as a label-balanced example
-            # because training on "absent=supported" teaches the verifier to
-            # use the image to confirm absence rather than relying on negation
-            # cues in text alone.
-            out.append(SynthesizedClaim(structured=structured, gt_label="SUPPORTED"))
+            # Asserts presence of a finding that IS NOT on the image → CONTRADICTED
+            out.append(SynthesizedClaim(structured=structured, gt_label="CONTRADICTED"))
 
     return out
 
