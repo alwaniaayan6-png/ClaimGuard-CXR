@@ -68,16 +68,32 @@ class V5TrainConfig:
     wandb_run_name: str | None = None
     image_masked_prob: float = 0.2  # probability of applying image-masked consistency step per batch
     contrast_prob: float = 0.5       # probability of computing contrastive loss per batch
-    adversarial_ho_filter: bool = False  # drop HO-solvable examples at dataloader load time
+    uncertainty_prob: float = 0.2    # probability of running MC-dropout sampling per batch (cost: uncertainty_n_samples extra forwards)
+    uncertainty_n_samples: int = 5   # number of MC forward passes when the uncertainty loss fires
+    adversarial_ho_filter: bool = False  # downweight HO-solvable examples during training
+    ho_filter_weights_path: Path | None = None  # path to per-example weights written by the HO filter
     freeze_image_layers: int = 8
     freeze_text_layers: int = 16
     grounding_enabled: bool = True
 
 
 class GroundBenchDataset(Dataset):
-    """Load rows from a GroundBench JSONL, build (image, claim, evidence, label) samples."""
+    """Load rows from a GroundBench JSONL, build (image, claim, evidence, label) samples.
 
-    def __init__(self, jsonl_path: Path, image_root: Path, tokenizer: Any, cfg: V5TrainConfig):
+    If `weights_path` is provided, loads per-example training weights from a
+    JSONL mapping {"row_idx": int, "weight": float} produced by the adversarial
+    HO filter. Missing rows default to weight 1.0.
+    """
+
+    def __init__(
+        self,
+        jsonl_path: Path,
+        image_root: Path,
+        tokenizer: Any,
+        cfg: V5TrainConfig,
+        *,
+        weights_path: Path | None = None,
+    ):
         self.rows: list[dict] = []
         with jsonl_path.open() as f:
             for line in f:
@@ -90,6 +106,22 @@ class GroundBenchDataset(Dataset):
         self.image_root = image_root
         self.tokenizer = tokenizer
         self.cfg = cfg
+        self.weights: list[float] = [1.0] * len(self.rows)
+        if weights_path is not None and weights_path.exists():
+            with weights_path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    w = json.loads(line)
+                    idx = w["row_idx"]
+                    if 0 <= idx < len(self.weights):
+                        self.weights[idx] = float(w["weight"])
+            logger.info(
+                "loaded HO filter weights from %s (mean=%.3f)",
+                weights_path,
+                sum(self.weights) / max(1, len(self.weights)),
+            )
         logger.info("Loaded %d resolved-GT rows from %s", len(self.rows), jsonl_path)
 
     def __len__(self) -> int:
@@ -117,14 +149,26 @@ class GroundBenchDataset(Dataset):
         return transform(img)
 
     def _encode_text(self, claim: str, evidence: str | None) -> dict[str, torch.Tensor]:
-        text = claim if evidence is None else f"{claim}</s></s>{evidence}"
-        enc = self.tokenizer(
-            text,
-            max_length=self.cfg.max_text_tokens,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-        )
+        # Use the tokenizer's text_pair API so the RoBERTa </s></s> separator is
+        # injected as real special tokens, not as three characters (< / s >).
+        # Truncate only the evidence side to preserve the claim intact.
+        if evidence is None or not evidence.strip():
+            enc = self.tokenizer(
+                claim,
+                max_length=self.cfg.max_text_tokens,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            )
+        else:
+            enc = self.tokenizer(
+                claim,
+                evidence,
+                max_length=self.cfg.max_text_tokens,
+                truncation="only_second",
+                padding="max_length",
+                return_tensors="pt",
+            )
         return {k: v.squeeze(0) for k, v in enc.items()}
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
@@ -137,8 +181,9 @@ class GroundBenchDataset(Dataset):
             "input_ids": enc["input_ids"],
             "attention_mask": enc["attention_mask"],
             "labels": torch.tensor(label, dtype=torch.long),
+            "weight": torch.tensor(self.weights[idx], dtype=torch.float32),
         }
-        # Optionally attach grounding target if source_site == 'ms_cxr' and bbox is carried.
+        # Optionally attach grounding target if bbox/mask is carried in the row.
         # (handled at collate stage via a sidecar channel; elided here for brevity)
         return out
 
@@ -175,34 +220,10 @@ def _lr_schedule(optimizer: AdamW, total_steps: int, warmup_steps: int) -> Lambd
 
 
 # ---------------------------------------------------------------------------
-# Adversarial HO filter
+# (Adversarial HO filter moved to v5/ho_filter.py. Import via:
+#   from .ho_filter import run_ho_filter
+# to avoid circular imports with this module's train_v5.)
 # ---------------------------------------------------------------------------
-
-
-def adversarial_ho_filter(
-    jsonl_path: Path,
-    out_path: Path,
-    tokenizer: Any,
-    device: str = "cuda",
-    n_seeds: int = 3,
-    confidence_threshold: float = 0.9,
-) -> None:
-    """Drop examples an evidence-blind HO baseline solves.
-
-    This is a pre-training pass. The HO baseline is a RoBERTa-large cross-
-    encoder trained for 2 epochs on the text-only (claim-only) inputs from the
-    training set. Examples it solves at >=confidence_threshold across all
-    n_seeds are excluded from v5 training.
-
-    This function is a placeholder that writes out a filtered JSONL assuming the
-    HO baseline has already been trained. The heavy lifting (training N HO
-    baselines and running inference) happens in
-    `modal/adversarial_ho_filter.py`.
-    """
-    raise NotImplementedError(
-        "Call modal/adversarial_ho_filter.py to train HO baselines and filter; "
-        "this function exists as a placeholder for import-time symbol."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +295,28 @@ def train_v5(cfg: V5TrainConfig, model_cfg: V5Config | None = None) -> list[Epoc
     tokenizer = build_v5_tokenizer(model_cfg)
     model = build_v5_model(model_cfg).to(device)
 
-    train_ds = GroundBenchDataset(cfg.train_jsonl, cfg.image_root, tokenizer, cfg)
+    # If HO filter is enabled, ensure weights exist on disk before loading.
+    ho_weights_path: Path | None = cfg.ho_filter_weights_path
+    if cfg.adversarial_ho_filter:
+        if ho_weights_path is None:
+            ho_weights_path = cfg.out_dir / "ho_filter_weights.jsonl"
+        if not ho_weights_path.exists():
+            logger.info("HO filter enabled but weights not found at %s; running filter now", ho_weights_path)
+            from .ho_filter import run_ho_filter
+
+            run_ho_filter(
+                train_jsonl=cfg.train_jsonl,
+                output_weights_path=ho_weights_path,
+                tokenizer=tokenizer,
+                device=device,
+                max_text_tokens=cfg.max_text_tokens,
+                seed=cfg.seed,
+            )
+
+    train_ds = GroundBenchDataset(
+        cfg.train_jsonl, cfg.image_root, tokenizer, cfg,
+        weights_path=ho_weights_path if cfg.adversarial_ho_filter else None,
+    )
     val_ds = GroundBenchDataset(cfg.val_jsonl, cfg.image_root, tokenizer, cfg)
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=4, pin_memory=True
@@ -330,23 +372,55 @@ def train_v5(cfg: V5TrainConfig, model_cfg: V5Config | None = None) -> list[Epoc
                     logits_masked = None
 
                 # Contrastive evidence pair: shuffle batch evidence to produce mismatches.
+                # CRITICAL: applies ONLY to SUPPORTED anchors (label==0). Applying it to
+                # CONTRADICTED anchors inverts the objective (for a CONTRADICTED claim,
+                # shuffled evidence may be MORE correct than the original, so rewarding
+                # score_matched > score_mismatched is wrong-direction).
+                # Also use identity-rejecting permutation so i->i pairs (which would be
+                # "matched" masquerading as "mismatched") cannot occur.
+                support_score_matched_for_loss = out_full["support_score"]
+                score_mis = None
                 if cfg.loss_weights.contrast > 0 and torch.rand(1).item() < cfg.contrast_prob:
-                    perm = torch.randperm(y.size(0), device=device)
-                    out_mis = model(pv, ii[perm], am[perm])
-                    score_mis = out_mis["support_score"]
-                else:
-                    score_mis = None
+                    supported_mask = (y == 0)
+                    n_sup = int(supported_mask.sum().item())
+                    if n_sup >= 2:
+                        sup_idx = supported_mask.nonzero(as_tuple=True)[0]
+                        perm = torch.randperm(n_sup, device=device)
+                        identity = (perm == torch.arange(n_sup, device=device))
+                        if identity.any():
+                            perm = (perm + 1) % n_sup
+                        out_mis = model(pv[sup_idx], ii[sup_idx][perm], am[sup_idx][perm])
+                        support_score_matched_for_loss = out_full["support_score"][sup_idx]
+                        score_mis = out_mis["support_score"]
+
+                # MC-dropout samples for uncertainty loss (v5.4 only; no-op
+                # elsewhere because cfg.loss_weights.uncert == 0).
+                uncertainty_mc_probs = None
+                if cfg.loss_weights.uncert > 0 and torch.rand(1).item() < cfg.uncertainty_prob:
+                    mc_samples = []
+                    for _ in range(cfg.uncertainty_n_samples):
+                        out_mc = model(pv, ii, am)
+                        mc_samples.append(torch.softmax(out_mc["verdict_logits"], dim=-1))
+                    uncertainty_mc_probs = torch.stack(mc_samples, dim=0)
+
+                # Per-example weights from adversarial HO filter (identity
+                # weights if the filter is disabled or weights not loaded).
+                example_weights = batch.get("weight")
+                if example_weights is not None:
+                    example_weights = example_weights.to(device, non_blocking=True)
 
                 loss_out: LossOutput = total_loss(
                     weights=cfg.loss_weights,
                     verdict_logits_full=out_full["verdict_logits"],
                     verdict_logits_masked=logits_masked,
-                    support_score_matched=out_full["support_score"],
+                    support_score_matched=support_score_matched_for_loss,
                     support_score_mismatched=score_mis,
                     labels=y,
                     grounding_logits=out_full.get("grounding_logits"),
                     grounding_target=None,  # populated when MS-CXR rows are in-batch; elided here
                     grounding_mask=None,
+                    uncertainty_mc_probs=uncertainty_mc_probs,
+                    example_weights=example_weights,
                 )
                 loss = loss_out.total / cfg.grad_accum
 

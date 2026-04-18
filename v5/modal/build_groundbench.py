@@ -63,6 +63,7 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
     from v5.data.claim_parser import llm_parse, rule_parse, load_ontology
     from v5.data.claim_matcher import ClaimMatcher, Annotation
     from v5.data.anatomy_masks import compute_anatomy_masks
+    from v5.data.claim_synthesizer import synthesize_claims_for_image, default_site_findings
     from v5.data.groundbench import assemble_row, split_and_write, aggregate_summary
     from v5.data import chexpert_plus as ds_chexpert
     from v5.data import openi as ds_openi
@@ -105,9 +106,20 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
             lambda: ds_padchest.iter_padchest(P("/data/padchest")),
             ds_padchest.annotations_for_record,
         ),
-        "brax": (
-            lambda: ds_brax.iter_brax(P("/data/brax")),
-            ds_brax.annotations_for_record,
+        # brax: DEPRECATED in v5.0 — PhysioNet-credentialed, out of public-only scope.
+        # Loader retained for any future credentialed extension but NOT dispatched.
+        # See ARCHITECTURE_V5_0_EVIDENCE_BLINDNESS.md §4.1.
+        "rsna_pneumonia": (
+            lambda: ds_rsna.iter_rsna(P("/data/rsna_pneumonia")),
+            ds_rsna.annotations_for_record,
+        ),
+        "siim_acr": (
+            lambda: ds_siim.iter_siim(P("/data/siim_acr_pneumothorax")),
+            ds_siim.annotations_for_record,
+        ),
+        "object_cxr": (
+            lambda: ds_objcxr.iter_object_cxr(P("/data/object_cxr")),
+            ds_objcxr.annotations_for_record,
         ),
     }
     if site not in site_cfg:
@@ -141,7 +153,7 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
             report_text = rec.report_en or rec.report_pt
             country = "BR"
         elif site in {"rsna_pneumonia", "siim_acr", "object_cxr", "chestx_det10"}:
-            report_text = ""  # no reports; skip claim extraction
+            report_text = ""  # no reports — claims come from annotation synthesizer below
         summary_counts["images"] += 1
 
         # Extract claims (only for sites that have reports)
@@ -183,8 +195,40 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
                 )
                 rows.append(row)
                 summary_counts["claims"] += 1
-        # Sites without reports: still produce "dummy" anchor rows for use as
-        # image-grounded test-set (claims will come from VLMs in later passes).
+        elif site in {"rsna_pneumonia", "siim_acr", "object_cxr", "chestx_det10"} and annotations:
+            # Detection-only sites: synthesize claims deterministically from
+            # the bounding-box/mask labels. One positive claim per annotation,
+            # plus one negative claim per image sampled from absent findings
+            # in the site's taxonomy.
+            try:
+                anatomy = compute_anatomy_masks(rec.image_path)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{site}] anatomy_masks failed on {rec.image_id}: {exc}")
+                anatomy = None
+            synth_claims = synthesize_claims_for_image(
+                image_id=str(rec.image_id),
+                annotations=annotations,
+                source=site,
+                all_findings_in_site=default_site_findings(site),
+                emit_negatives=True,
+            )
+            for sc in synth_claims:
+                row = assemble_row(
+                    sc.structured,
+                    annotations,
+                    anatomy,
+                    image_path=rec.image_path,
+                    source_site=site,
+                    evidence_text=None,
+                    patient_id=patient_id,
+                    sex=sex,
+                    age=age,
+                    scanner_manufacturer=scanner,
+                    country=country,
+                    matcher=matcher,
+                )
+                rows.append(row)
+                summary_counts["claims"] += 1
 
     split_and_write(rows, out_root, seed=17)
     summary = aggregate_summary(rows)
@@ -193,6 +237,36 @@ def build_groundbench_for_site(site: str, limit: int = 0, use_llm_extractor: boo
     return summary
 
 
+@app.function(image=image, cpu=4.0, memory=16_000, timeout=60 * 30, volumes={"/data": volume})
+def aggregate_groundbench_fn(sites: list[str] | None = None) -> dict:
+    """Modal entrypoint: concat per-site JSONLs into /data/groundbench_v5/all/.
+
+    Run this AFTER build_groundbench_for_site has completed for each site you
+    want in the aggregated manifest. Training reads from /data/groundbench_v5/all/.
+    """
+    import sys
+
+    sys.path.insert(0, "/root/verifact")
+
+    from pathlib import Path as P
+
+    from v5.data.groundbench import aggregate_groundbench
+
+    summary = aggregate_groundbench(P("/data/groundbench_v5"), sites=sites)
+    print(summary)
+    return summary
+
+
 @app.local_entrypoint()
 def build_groundbench_entrypoint(site: str = "chexpert_plus", limit: int = 0, use_llm: bool = False) -> None:
     print(build_groundbench_for_site.remote(site=site, limit=limit, use_llm_extractor=use_llm))
+
+
+@app.local_entrypoint()
+def aggregate_entrypoint(sites: str = "") -> None:
+    """Run aggregation across sites. Usage:
+        modal run v5/modal/build_groundbench.py::aggregate_entrypoint --sites chexpert_plus,openi,chestx_det10
+    If sites is empty, auto-discovers all per-site directories under /data/groundbench_v5/.
+    """
+    site_list = [s.strip() for s in sites.split(",") if s.strip()] or None
+    print(aggregate_groundbench_fn.remote(sites=site_list))

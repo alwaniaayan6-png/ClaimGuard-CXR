@@ -81,8 +81,9 @@ def assemble_row(
 ) -> GroundBenchRow:
     matcher = matcher or ClaimMatcher()
     result: MatchResult = matcher.match(structured, annotations, anatomy)
+    image_id = anatomy.image_id if anatomy is not None else structured.report_id
     return GroundBenchRow(
-        image_id=structured.report_id if not structured.claim_id else anatomy.image_id if anatomy else structured.report_id,
+        image_id=image_id,
         image_path=str(image_path),
         source_site=source_site,
         claim_id=structured.claim_id,
@@ -143,3 +144,57 @@ def aggregate_summary(rows: list[GroundBenchRow]) -> dict:
         "per_site": dict(per_site),
         "per_generator": dict(per_gen),
     }
+
+
+def aggregate_groundbench(
+    groundbench_root: Path,
+    *,
+    sites: list[str] | None = None,
+    splits: tuple[str, ...] = ("train", "val", "cal", "test"),
+) -> dict:
+    """Concat per-site JSONL splits into groundbench_root/all/{split}.jsonl.
+
+    Reads `groundbench_root/<site>/groundbench_v5_<split>.jsonl` for every
+    site in `sites` (auto-discovered if None) and writes the unioned rows to
+    `groundbench_root/all/groundbench_v5_<split>.jsonl`.
+
+    This is the aggregation step that v5 training loads from. Without it,
+    `/data/groundbench_v5/all/` does not exist and training cannot find the
+    unioned manifest.
+    """
+    from ._common import read_jsonl, write_jsonl
+
+    groundbench_root = Path(groundbench_root)
+    if sites is None:
+        sites = sorted(
+            p.name
+            for p in groundbench_root.iterdir()
+            if p.is_dir() and p.name != "all"
+        )
+
+    all_dir = groundbench_root / "all"
+    all_dir.mkdir(parents=True, exist_ok=True)
+
+    summary: dict[str, dict] = {}
+    for split in splits:
+        unioned: list[dict] = []
+        per_site_counts: dict[str, int] = {}
+        for site in sites:
+            jsonl = groundbench_root / site / f"groundbench_v5_{split}.jsonl"
+            if not jsonl.exists():
+                logger.warning("missing %s; skipping", jsonl)
+                per_site_counts[site] = 0
+                continue
+            rows = list(read_jsonl(jsonl))
+            unioned.extend(rows)
+            per_site_counts[site] = len(rows)
+        out_path = all_dir / f"groundbench_v5_{split}.jsonl"
+        write_jsonl(unioned, out_path)
+        logger.info("aggregated %d rows to %s", len(unioned), out_path)
+        summary[split] = {"total": len(unioned), "per_site": per_site_counts}
+
+    manifest = all_dir / "aggregate_manifest.json"
+    import json as _json
+
+    manifest.write_text(_json.dumps(summary, indent=2))
+    return summary

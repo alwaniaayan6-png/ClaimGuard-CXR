@@ -91,6 +91,6 @@ vlm_generators:
   seeds: [101, 202]
 
 budget:
-  phase_cap_usd: 500
-  hard_cap_usd: 2500
+  phase_cap_usd: 200
+  hard_cap_usd: 900
   auto_halt_ratio: 1.10

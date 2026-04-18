@@ -150,31 +150,60 @@ class ImageGroundedVerifier(nn.Module):
     # ------------------------------------------------------------------ utils
 
     def _freeze_image(self, n_freeze: int) -> None:
-        """Freeze the first n_freeze transformer blocks of the ViT."""
-        # BiomedCLIP's vision model under AutoModel exposes .encoder.layer for ViT-like;
-        # fall back to freezing everything except the last N blocks if we cannot
-        # introspect.
+        """Freeze the first n_freeze transformer blocks of the ViT.
+
+        If the encoder structure is unrecognized, we RAISE rather than silently
+        freezing the entire encoder (which would prevent the grounding head
+        from learning). Any new backbone must add its attribute path here.
+        """
+        # Candidate attribute paths across HF/open_clip/timm ViT variants.
+        # Ordered roughly from most-specific to most-generic.
+        candidate_paths = (
+            "encoder.layer",                 # HF BERT-style / some ViT
+            "vision_model.encoder.layers",   # CLIPVisionModel
+            "visual.trunk.blocks",           # open_clip timm-backed
+            "visual.transformer.resblocks",  # open_clip classic
+            "vision_model.trunk.blocks",     # BiomedCLIP HF wrapper
+            "trunk.blocks",                  # bare timm ViT
+            "blocks",                        # raw timm
+            "encoder.layers",                # some variants
+            "vision_model.vision_model.encoder.layers",  # double-wrapped
+        )
         blocks = None
-        for path in ("encoder.layer", "vision_model.encoder.layers", "visual.trunk.blocks"):
+        matched_path: str | None = None
+        for path in candidate_paths:
             obj: Any = self.image_encoder
             try:
                 for part in path.split("."):
                     obj = getattr(obj, part)
+                # Require it to be indexable (list/Sequential/ModuleList)
+                _ = len(obj)
                 blocks = obj
+                matched_path = path
                 break
-            except AttributeError:
+            except (AttributeError, TypeError):
                 continue
+
         if blocks is None:
-            logger.warning("Could not locate image encoder blocks; freezing entire encoder")
-            for p in self.image_encoder.parameters():
-                p.requires_grad = False
-            return
+            # List top-level attributes to help future debugging.
+            top = [a for a in dir(self.image_encoder) if not a.startswith("_")][:30]
+            raise RuntimeError(
+                "Could not locate image encoder transformer blocks; refusing to "
+                "fall through to whole-encoder freeze (that would silently disable "
+                "grounding). Add the correct attribute path to _freeze_image. "
+                f"Top-level attrs on encoder: {top}"
+            )
+
         total = len(blocks)
         n_freeze = min(n_freeze, total)
         for i, block in enumerate(blocks):
+            frozen = i < n_freeze
             for p in block.parameters():
-                p.requires_grad = i >= (total - (total - n_freeze))
-        logger.info("Froze first %d of %d image encoder blocks", n_freeze, total)
+                p.requires_grad = not frozen
+        logger.info(
+            "froze first %d of %d image encoder blocks (path=%s)",
+            n_freeze, total, matched_path,
+        )
 
     def _freeze_text(self, n_freeze: int) -> None:
         for name, p in self.text_encoder.named_parameters():

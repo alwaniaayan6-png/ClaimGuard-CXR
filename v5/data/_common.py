@@ -48,26 +48,45 @@ def ensure_split(
     records: list[dict],
     key: str,
     *,
-    train_frac: float = 0.8,
+    train_frac: float = 0.7,
+    val_frac: float = 0.1,
     cal_frac: float = 0.1,
     seed: int = 17,
 ) -> dict[str, list[dict]]:
-    """Group-aware split on `key` (patient/report/image) into train/cal/test."""
+    """Group-aware split on `key` (patient/report/image) into train/val/cal/test.
+
+    val is used for early stopping and hyperparameter selection.
+    cal is used for conformal calibration and must be disjoint from val to
+    preserve exchangeability guarantees. Never collapse val and cal (v4 bug).
+    """
     import random
+
+    if train_frac + val_frac + cal_frac >= 1.0:
+        raise ValueError(
+            f"train_frac + val_frac + cal_frac must be < 1.0 (got "
+            f"{train_frac}+{val_frac}+{cal_frac}={train_frac+val_frac+cal_frac}). "
+            "Remainder is the test split."
+        )
 
     rng = random.Random(seed)
     groups = sorted({r[key] for r in records})
     rng.shuffle(groups)
-    n_train = int(len(groups) * train_frac)
-    n_cal = int(len(groups) * cal_frac)
+    n = len(groups)
+    n_train = int(n * train_frac)
+    n_val = int(n * val_frac)
+    n_cal = int(n * cal_frac)
     train_keys = set(groups[:n_train])
-    cal_keys = set(groups[n_train : n_train + n_cal])
-    test_keys = set(groups[n_train + n_cal :])
-    out: dict[str, list[dict]] = {"train": [], "cal": [], "test": []}
+    val_keys = set(groups[n_train : n_train + n_val])
+    cal_keys = set(groups[n_train + n_val : n_train + n_val + n_cal])
+    test_keys = set(groups[n_train + n_val + n_cal :])
+
+    out: dict[str, list[dict]] = {"train": [], "val": [], "cal": [], "test": []}
     for r in records:
         v = r[key]
         if v in train_keys:
             out["train"].append(r)
+        elif v in val_keys:
+            out["val"].append(r)
         elif v in cal_keys:
             out["cal"].append(r)
         else:

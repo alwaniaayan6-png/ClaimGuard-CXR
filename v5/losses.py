@@ -15,7 +15,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 
 @dataclass
@@ -95,25 +94,28 @@ def contrastive_evidence_loss(
 
 
 def uncertainty_regularizer(
-    verdict_logits: torch.Tensor,
+    mc_probs: torch.Tensor,
     labels: torch.Tensor,
-    p: float = 0.2,
-    n_samples: int = 3,
 ) -> torch.Tensor:
-    """Approximate MC-dropout calibration regularizer via multi-sample ECE.
+    """Bin-free MC-dropout ECE.
 
-    Called on the batch's verdict_logits with additional dropout noise applied.
-    Keeps the expected softmax near the label frequency.
+    Args:
+        mc_probs: (S, B, C) softmax probabilities from S forward passes of the
+            full model with dropout modules in training mode. The caller MUST
+            obtain these via repeated forwards — applying Dropout to
+            pre-computed logits is NOT MC-dropout and would defeat the purpose.
+        labels: (B,) ground-truth class indices.
+
+    Returns:
+        Mean |confidence - correctness| over the batch.
     """
-    # We approximate this by generating n_samples dropout-perturbed logits.
-    probs = []
-    drop = nn.Dropout(p)
-    for _ in range(n_samples):
-        probs.append(F.softmax(drop(verdict_logits), dim=-1))
-    mean_p = torch.stack(probs, dim=0).mean(dim=0)
+    if mc_probs.dim() != 3:
+        raise ValueError(
+            f"uncertainty_regularizer expects mc_probs of shape (S,B,C); got {tuple(mc_probs.shape)}"
+        )
+    mean_p = mc_probs.mean(dim=0)
     conf, pred = mean_p.max(dim=-1)
     correct = (pred == labels).float()
-    # bin-free ECE: |confidence - correctness|
     return (conf - correct).abs().mean()
 
 
@@ -138,11 +140,20 @@ def total_loss(
     grounding_logits: torch.Tensor | None,
     grounding_target: torch.Tensor | None,
     grounding_mask: torch.Tensor | None,
+    uncertainty_mc_probs: torch.Tensor | None = None,
+    example_weights: torch.Tensor | None = None,
 ) -> LossOutput:
+    """Combined loss. `example_weights` (B,) applies per-example downweighting
+    (from the adversarial HO filter) to the classification term only.
+    """
     device = verdict_logits_full.device
     zero = torch.zeros((), device=device)
 
-    cls = classification_loss(verdict_logits_full, labels)
+    if example_weights is None:
+        cls = classification_loss(verdict_logits_full, labels)
+    else:
+        per_example = F.cross_entropy(verdict_logits_full, labels.long(), reduction="none")
+        cls = (per_example * example_weights).mean()
 
     if (
         weights.ground > 0
@@ -168,8 +179,8 @@ def total_loss(
     else:
         contrast = zero
 
-    if weights.uncert > 0:
-        uncert = uncertainty_regularizer(verdict_logits_full, labels)
+    if weights.uncert > 0 and uncertainty_mc_probs is not None:
+        uncert = uncertainty_regularizer(uncertainty_mc_probs, labels)
     else:
         uncert = zero
 

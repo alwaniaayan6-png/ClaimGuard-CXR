@@ -59,7 +59,7 @@ except Exception:
 @app.function(
     image=image,
     gpu="H100",
-    timeout=60 * 60 * 12,
+    timeout=60 * 60 * 4,
     volumes={"/data": volume},
     secrets=SECRETS,
 )
@@ -89,7 +89,10 @@ def train_v5_run(config_name: str) -> dict:
     lw = LossWeights(**cfg_dict["loss"])
     tcfg = V5TrainConfig(
         train_jsonl=P(cfg_dict["paths"]["groundbench_root"]) / "all" / "groundbench_v5_train.jsonl",
-        val_jsonl=P(cfg_dict["paths"]["groundbench_root"]) / "all" / "groundbench_v5_cal.jsonl",
+        # CRITICAL: val MUST be disjoint from cal. cal is reserved for conformal
+        # calibration and using it for validation/early-stopping voids the
+        # exchangeability assumption behind the FDR guarantee (v4 bug fix).
+        val_jsonl=P(cfg_dict["paths"]["groundbench_root"]) / "all" / "groundbench_v5_val.jsonl",
         out_dir=P(cfg_dict["paths"]["out_root"]) / config_name,
         image_root=P(cfg_dict["paths"]["data_root"]),
         batch_size=cfg_dict["train"]["batch_size"],
