@@ -59,7 +59,7 @@ image = (
         "torchxrayvision==1.3.5",
         "anthropic==0.42.0",
         "scikit-image==0.24.0",
-        "huggingface_hub==0.26.2",
+        "huggingface_hub>=0.30.0,<1.0",
     )
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
@@ -75,7 +75,9 @@ for name in ("anthropic", "huggingface"):
 
 
 _H100 = "H100"
-_H100_80 = "H100:80GB"
+# Modal H100 SKU is 80 GB by default; higher memory or multi-GPU would use
+# "H100:2" (2 GPUs), not "H100:80GB".
+_H100_80 = "H100"
 
 _STATUS_PATH = "/data/v6_results/status.json"
 
@@ -345,11 +347,11 @@ def padchest_gr_assemble(
     if _skip_if_exists(out_jsonl, "padchest_gr_assemble"):
         return {"status": "skipped"}
 
-    from v5.data.padchest_gr import load_records, translate_reports, records_to_jsonl
+    from v5.data.padchest_gr import load_records, translate_missing_en_sentences, records_to_jsonl
     records = load_records(P(raw_root), max_records=max_records)
     if translate:
-        n = translate_reports(records)
-        print(f"translated {n} reports ES -> EN")
+        n = translate_missing_en_sentences(records)
+        print(f"translated {n} missing EN sentences via Claude Haiku")
     count = records_to_jsonl(records, P(out_jsonl))
     payload = {"status": "ok", "n_records": count, "output": out_jsonl}
     _write_status("padchest_gr_assemble", payload)
