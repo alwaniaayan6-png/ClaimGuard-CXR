@@ -57,43 +57,80 @@ class RRGGenerator:
         raise NotImplementedError
 
 
+def _hf_token() -> str | None:
+    """Return whichever HF auth env var is set (the huggingface Modal secret
+    name may expose any of these)."""
+    import os
+    for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN",
+              "HUGGINGFACE_TOKEN"):
+        if os.environ.get(k):
+            return os.environ[k]
+    return None
+
+
 class CheXagentV2Generator(RRGGenerator):
-    """CheXagent-2-3b as a findings-section generator."""
+    """CheXagent-2-3b as a findings-section generator.
+
+    CheXagent-2-3b follows the Qwen-VL-style tokenizer-based image-input
+    convention: images are passed *by path* through
+    ``tokenizer.from_list_format([{'image': path}, {'text': prompt}])`` rather
+    than via ``AutoProcessor``. The model does not ship a preprocessor_config,
+    so ``AutoProcessor`` will raise. We therefore save the PIL to a temp file
+    and call the tokenizer's custom path-based interface per the model card
+    example.
+    """
 
     name = "chexagent-2-3b"
     model_id = "StanfordAIMI/CheXagent-2-3b"
     max_new_tokens = 256
 
     def __init__(self, device: torch.device | str = "cuda"):
-        import os
-        from transformers import AutoProcessor, AutoModelForCausalLM
+        from transformers import AutoTokenizer, AutoModelForCausalLM
         kwargs: dict[str, Any] = {"trust_remote_code": True}
-        if os.environ.get("HF_TOKEN"):
-            kwargs["token"] = os.environ["HF_TOKEN"]
+        token = _hf_token()
+        if token:
+            kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
-        self.processor = AutoProcessor.from_pretrained(self.model_id, **kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, **kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id, torch_dtype=torch.bfloat16, **kwargs,
-        ).to(self.device).eval()
+            self.model_id, device_map="auto", torch_dtype=torch.bfloat16, **kwargs,
+        ).eval()
 
     @torch.no_grad()
     def generate(self, pil: Image.Image, image_id: str = "") -> GenerationResult:
+        import tempfile
         t0 = time.time()
         prompt = (
             "Describe the findings of the frontal chest radiograph in a structured "
             "radiology report. Use the style: 'Lungs: ... Heart: ... Pleura: ... "
             "Bones: ... Other: ...'. Do not include an impression section."
         )
-        messages = [
-            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}
-        ]
-        chat = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        inputs = self.processor(text=chat, images=pil, return_tensors="pt").to(self.device)
-        if "pixel_values" in inputs:
-            inputs["pixel_values"] = inputs["pixel_values"].to(self.model.dtype)
-        out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
-        gen = out[0, inputs["input_ids"].shape[-1]:]
-        text = self.processor.tokenizer.decode(gen, skip_special_tokens=True).strip()
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
+            pil.save(tmp.name, format="PNG")
+            query = self.tokenizer.from_list_format([
+                {"image": tmp.name},
+                {"text": prompt},
+            ])
+            conv = [
+                {"from": "system", "value": "You are a helpful radiology assistant."},
+                {"from": "human", "value": query},
+            ]
+            input_ids = self.tokenizer.apply_chat_template(
+                conv, add_generation_prompt=True, return_tensors="pt"
+            )
+            output = self.model.generate(
+                input_ids.to(self.device),
+                do_sample=False,
+                num_beams=1,
+                temperature=1.0,
+                top_p=1.0,
+                use_cache=True,
+                max_new_tokens=self.max_new_tokens,
+            )[0]
+            gen = output[input_ids.size(1):]
+            text = self.tokenizer.decode(gen, skip_special_tokens=True).strip()
+            if text.endswith("<|endoftext|>"):
+                text = text[: -len("<|endoftext|>")].rstrip()
         return GenerationResult(
             model=self.name,
             image_id=image_id,
@@ -111,11 +148,11 @@ class MedGemma4BGenerator(RRGGenerator):
     max_new_tokens = 256
 
     def __init__(self, device: torch.device | str = "cuda"):
-        import os
         from transformers import pipeline
         kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
-        if os.environ.get("HF_TOKEN"):
-            kwargs["token"] = os.environ["HF_TOKEN"]
+        token = _hf_token()
+        if token:
+            kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.pipe = pipeline(
             "image-text-to-text",
@@ -185,11 +222,11 @@ class MAIRA2Generator(RRGGenerator):
     max_new_tokens = 300
 
     def __init__(self, device: torch.device | str = "cuda"):
-        import os
         from transformers import AutoProcessor, AutoModelForCausalLM
         kwargs: dict[str, Any] = {"trust_remote_code": True}
-        if os.environ.get("HF_TOKEN"):
-            kwargs["token"] = os.environ["HF_TOKEN"]
+        token = _hf_token()
+        if token:
+            kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.processor = AutoProcessor.from_pretrained(self.model_id, **kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(

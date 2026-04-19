@@ -324,10 +324,21 @@ class BiomedCLIPZeroShotBaseline(BaselineVerifier):
         return 1 if image_says_present else 0
 
 
-class CheXagentV2Baseline(BaselineVerifier):
-    """CheXagent-2-3b (Stanford AIMI, MIT license) as a zero-shot claim verifier.
+def _baselines_hf_token() -> str | None:
+    for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN",
+              "HUGGINGFACE_TOKEN"):
+        if os.environ.get(k):
+            return os.environ[k]
+    return None
 
-    Chat-template model on a Phi-based LLM. Uses AutoModelForCausalLM with trust_remote_code.
+
+class CheXagentV2Baseline(BaselineVerifier):
+    """CheXagent-2-3b (Stanford AIMI, MIT) as a zero-shot claim verifier.
+
+    Uses the Qwen-VL-style tokenizer-based image-input interface per the
+    CheXagent-2-3b model card — ``tokenizer.from_list_format`` + chat
+    template; the repo does not ship a preprocessor_config, so AutoProcessor
+    cannot be used.
     """
 
     model_id = "StanfordAIMI/CheXagent-2-3b"
@@ -335,19 +346,20 @@ class CheXagentV2Baseline(BaselineVerifier):
 
     def __init__(self, device: torch.device | str = "cuda"):
         super().__init__("chexagent-2-3b")
-        import os as _os
-        from transformers import AutoProcessor, AutoModelForCausalLM
+        from transformers import AutoTokenizer, AutoModelForCausalLM
         kwargs: dict[str, Any] = {"trust_remote_code": True}
-        if _os.environ.get("HF_TOKEN"):
-            kwargs["token"] = _os.environ["HF_TOKEN"]
+        token = _baselines_hf_token()
+        if token:
+            kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
-        self.processor = AutoProcessor.from_pretrained(self.model_id, **kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, **kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id, torch_dtype=torch.bfloat16, **kwargs,
-        ).to(self.device).eval()
+            self.model_id, device_map="auto", torch_dtype=torch.bfloat16, **kwargs,
+        ).eval()
 
     @torch.no_grad()
     def predict(self, image, claim, evidence, *, zero_image, flip_image):
+        import tempfile
         pil = _tensor_to_pil(image, zero_image=zero_image, flip_image=flip_image)
         prompt_text = (
             "Given the chest radiograph, a claim, and supporting evidence, "
@@ -355,16 +367,27 @@ class CheXagentV2Baseline(BaselineVerifier):
             "CONTRADICTED otherwise.\n"
             f"Claim: {claim}\nEvidence: {evidence}\nVerdict:"
         )
-        messages = [
-            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt_text}]}
-        ]
-        chat = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        inputs = self.processor(text=chat, images=pil, return_tensors="pt").to(self.device)
-        if "pixel_values" in inputs:
-            inputs["pixel_values"] = inputs["pixel_values"].to(self.model.dtype)
-        out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
-        gen = out[0, inputs["input_ids"].shape[-1]:]
-        text = self.processor.tokenizer.decode(gen, skip_special_tokens=True)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
+            pil.save(tmp.name, format="PNG")
+            query = self.tokenizer.from_list_format([
+                {"image": tmp.name},
+                {"text": prompt_text},
+            ])
+            conv = [
+                {"from": "system", "value": "You are a helpful radiology assistant."},
+                {"from": "human", "value": query},
+            ]
+            input_ids = self.tokenizer.apply_chat_template(
+                conv, add_generation_prompt=True, return_tensors="pt"
+            )
+            output = self.model.generate(
+                input_ids.to(self.device),
+                do_sample=False,
+                max_new_tokens=self.max_new_tokens,
+                use_cache=True,
+            )[0]
+            gen = output[input_ids.size(1):]
+            text = self.tokenizer.decode(gen, skip_special_tokens=True)
         return _api_parse(text[:40])
 
 
@@ -380,11 +403,11 @@ class MedGemma4BBaseline(BaselineVerifier):
 
     def __init__(self, device: torch.device | str = "cuda"):
         super().__init__("medgemma-4b-it")
-        import os as _os
         from transformers import pipeline
         kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
-        if _os.environ.get("HF_TOKEN"):
-            kwargs["token"] = _os.environ["HF_TOKEN"]
+        token = _baselines_hf_token()
+        if token:
+            kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.pipe = pipeline(
             "image-text-to-text",
@@ -434,11 +457,11 @@ class MAIRA2Baseline(BaselineVerifier):
 
     def __init__(self, device: torch.device | str = "cuda"):
         super().__init__("maira-2")
-        import os as _os
         from transformers import AutoProcessor, AutoModelForCausalLM
         kwargs: dict[str, Any] = {"trust_remote_code": True}
-        if _os.environ.get("HF_TOKEN"):
-            kwargs["token"] = _os.environ["HF_TOKEN"]
+        token = _baselines_hf_token()
+        if token:
+            kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.processor = AutoProcessor.from_pretrained(self.model_id, **kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(
