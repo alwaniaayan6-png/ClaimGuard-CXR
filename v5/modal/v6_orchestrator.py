@@ -60,9 +60,18 @@ image = (
         "anthropic==0.42.0",
         "scikit-image==0.24.0",
         "huggingface_hub>=0.30.0,<1.0",
-        # Required by CheXagent-2-3b's trust_remote_code modeling file
+        # Required by CheXagent-2-3b's trust_remote_code modeling file.
+        # Added incrementally as the remote code imports surface failures.
         "matplotlib==3.9.2",
         "tensorflow-cpu==2.17.0",
+        "albumentations==1.4.15",
+        "opencv-python-headless==4.10.0.84",
+        "einops==0.8.0",
+        "timm==1.0.9",
+        # Preemptive — common transitive deps in CXR-VLM remote-code files.
+        "ftfy==6.2.3",
+        "regex==2024.9.11",
+        "protobuf==4.25.5",
     )
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
