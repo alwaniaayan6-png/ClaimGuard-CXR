@@ -368,16 +368,21 @@ def padchest_gr_assemble(
     secrets=secrets,
 )
 def assemble_v6_3site(
-    openi_jsonl: str = "/data/groundbench_v5/openi/groundbench_v5_openi.jsonl",
-    chestx_jsonl: str = "/data/groundbench_v5/chestx_det10/groundbench_v5_chestx_det10.jsonl",
-    padchest_gr_jsonl: str = "/data/groundbench_v5/padchest_gr_records.jsonl",
+    openi_dir: str = "/data/groundbench_v5/openi",
+    chestx_dir: str = "/data/groundbench_v5/chestx_det10",
+    padchest_gr_records: str = "/data/groundbench_v5/padchest_gr_records.jsonl",
     out_dir: str = "/data/groundbench_v5/all_v6",
 ) -> dict:
-    """Concatenate three site JSONLs into v6 train/val/cal/test splits.
+    """Concatenate per-split JSONLs from each site into v6 train/val/cal/test.
 
-    Produces patient-stratified 70/10/10/10 splits with per-site balance
-    preserved. Must run BEFORE train_v6_3site; reproduce_v6.sh calls this
-    as a blocking prerequisite.
+    The existing v5 site dirs ship per-split JSONLs already (train/val/cal/test),
+    so we preserve those split boundaries rather than re-hash-bucketing. For
+    PadChest-GR (which ships its own official 'train'/'validation'/'test'
+    split field), we map: train->train, validation->val, test split into
+    cal+test via patient-hash (since we need a calibration set that PadChest-GR
+    doesn't provide).
+
+    Must run BEFORE train_v6_3site; reproduce_v6.sh calls this blocking.
     """
     import sys
     sys.path.insert(0, "/root/verifact")
@@ -388,13 +393,12 @@ def assemble_v6_3site(
     if _skip_if_exists(str(P(out_dir) / "groundbench_v6_train.jsonl"), "assemble_v6_3site"):
         return {"status": "skipped"}
 
-    def _load(p: str) -> list[dict]:
+    def _load_jsonl(p: P) -> list[dict]:
         rows: list[dict] = []
-        pp = P(p)
-        if not pp.exists():
-            print(f"[assemble_v6_3site] MISSING {p} — skipping this site")
+        if not p.exists():
+            print(f"[assemble_v6_3site] MISSING {p} — skipping")
             return rows
-        with open(pp) as f:
+        with open(p) as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -402,62 +406,69 @@ def assemble_v6_3site(
                 rows.append(json.loads(line))
         return rows
 
-    openi_rows = _load(openi_jsonl)
-    chestx_rows = _load(chestx_jsonl)
-    padchest_rows = _load(padchest_gr_jsonl)
-    per_site = {
-        "openi": len(openi_rows),
-        "chestx_det10": len(chestx_rows),
-        "padchest_gr": len(padchest_rows),
-    }
-    sites_present = [k for k, n in per_site.items() if n > 0]
+    per_site: dict[str, dict[str, int]] = {}
+    split_rows: dict[str, list[dict]] = {s: [] for s in ("train", "val", "cal", "test")}
+
+    for site_name, site_dir in (("openi", openi_dir), ("chestx_det10", chestx_dir)):
+        site_path = P(site_dir)
+        site_counts: dict[str, int] = {}
+        for split in ("train", "val", "cal", "test"):
+            jp = site_path / f"groundbench_v5_{split}.jsonl"
+            rows = _load_jsonl(jp)
+            for r in rows:
+                r.setdefault("site", site_name)
+            split_rows[split].extend(rows)
+            site_counts[split] = len(rows)
+        per_site[site_name] = site_counts
+
+    # PadChest-GR: use its official split if present, else hash-bucket.
+    pg_rows = _load_jsonl(P(padchest_gr_records))
+    pg_counts = {"train": 0, "val": 0, "cal": 0, "test": 0, "skipped": 0}
+
+    def _hash_bucket(pid: str) -> int:
+        return int(hashlib.md5(pid.encode()).hexdigest(), 16) % 100
+
+    for r in pg_rows:
+        r.setdefault("site", "padchest_gr")
+        official = str(r.get("split") or "").lower()
+        if official == "train":
+            dest = "train"
+        elif official in ("validation", "val"):
+            dest = "val"
+        elif official == "test":
+            pid = str(r.get("patient_id") or r.get("study_id") or r.get("image_id") or "")
+            dest = "cal" if pid and _hash_bucket(pid) < 50 else "test"
+        else:
+            pid = str(r.get("patient_id") or r.get("study_id") or r.get("image_id") or "")
+            if not pid:
+                pg_counts["skipped"] += 1
+                continue
+            b = _hash_bucket(pid)
+            dest = "train" if b < 70 else ("val" if b < 80 else ("cal" if b < 90 else "test"))
+        split_rows[dest].append(r)
+        pg_counts[dest] += 1
+    per_site["padchest_gr"] = pg_counts
+
+    sites_present = [k for k, v in per_site.items() if sum(v.values()) > 0]
     if len(sites_present) < 2:
         return {"status": "failed", "reason": "fewer than 2 sites present",
                 "per_site": per_site}
     if len(sites_present) < 3:
         print(f"[assemble_v6_3site] WARNING: only {len(sites_present)} sites present "
               f"({sites_present}) — the 3-site headline cannot be reported")
-    all_rows = openi_rows + chestx_rows + padchest_rows
-
-    def _patient_key(r: dict) -> str:
-        return str(r.get("patient_id") or r.get("study_id") or r.get("image_id") or "")
-
-    patients = sorted({_patient_key(r) for r in all_rows if _patient_key(r)})
-
-    def _hash_bucket(pid: str) -> int:
-        h = int(hashlib.md5(pid.encode()).hexdigest(), 16) % 100
-        return h
-
-    assignment: dict[str, str] = {}
-    for p in patients:
-        b = _hash_bucket(p)
-        if b < 70:
-            assignment[p] = "train"
-        elif b < 80:
-            assignment[p] = "val"
-        elif b < 90:
-            assignment[p] = "cal"
-        else:
-            assignment[p] = "test"
 
     out = P(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    counts = {"train": 0, "val": 0, "cal": 0, "test": 0, "skipped": 0}
-    fhs = {s: open(out / f"groundbench_v6_{s}.jsonl", "w") for s in ("train", "val", "cal", "test")}
-    try:
-        for r in all_rows:
-            pid = _patient_key(r)
-            if not pid:
-                counts["skipped"] += 1
-                continue
-            split = assignment[pid]
-            fhs[split].write(json.dumps(r) + "\n")
-            counts[split] += 1
-    finally:
-        for f in fhs.values():
-            f.close()
-    payload = {"status": "ok", "counts": counts, "n_patients": len(patients),
-               "per_site": per_site, "sites_present": sites_present, "out_dir": str(out)}
+    split_counts: dict[str, int] = {}
+    for split, rows in split_rows.items():
+        out_path = out / f"groundbench_v6_{split}.jsonl"
+        with open(out_path, "w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+        split_counts[split] = len(rows)
+
+    payload = {"status": "ok", "split_counts": split_counts, "per_site": per_site,
+               "sites_present": sites_present, "out_dir": str(out)}
     _write_status("assemble_v6_3site", payload)
     return payload
 
