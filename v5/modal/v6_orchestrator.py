@@ -60,6 +60,9 @@ image = (
         "anthropic==0.42.0",
         "scikit-image==0.24.0",
         "huggingface_hub>=0.30.0,<1.0",
+        # Required by CheXagent-2-3b's trust_remote_code modeling file
+        "matplotlib==3.9.2",
+        "tensorflow-cpu==2.17.0",
     )
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
