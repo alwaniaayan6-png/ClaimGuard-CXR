@@ -37,8 +37,52 @@ VERIFACT_ROOT = (
 
 app = modal.App("claimguard-v6-orchestrator")
 
-# v6 image: includes transformers version pinned for MAIRA-2 (4.51.3), plus
-# the silver-labeler + probe dependencies.
+
+# CheXagent-2-3b's remote-code modeling file hard-checks ``transformers==4.40.0``
+# and also needs a specific older albumentations/albucore pair. MAIRA-2
+# requires ``transformers>=4.48,<4.52`` (tested on 4.51.3) and MedGemma-4B-IT
+# uses the modern image-text-to-text pipeline that also needs newer
+# transformers. The two version ranges are mutually exclusive, so we build
+# TWO images.
+#
+# - image_chexagent: transformers==4.40.0 + CheXagent's CV dep stack
+# - image_recent:    transformers==4.51.3 + modern silver labelers + MAIRA-2
+#                    + MedGemma-4B + everything else
+
+_chexagent_deps = (
+    "matplotlib==3.9.2",
+    "tensorflow-cpu==2.17.0",
+    "albumentations==1.4.3",
+    "albucore==0.0.13",
+    "opencv-python-headless==4.10.0.84",
+    "einops==0.8.0",
+    "timm==1.0.9",
+    "ftfy==6.2.3",
+    "regex==2024.9.11",
+    "protobuf==4.25.5",
+)
+
+image_chexagent = (
+    modal.Image.debian_slim(python_version="3.10")
+    .apt_install("git", "libgl1", "libglib2.0-0")
+    .pip_install(
+        "torch==2.4.0",
+        "torchvision==0.19.0",
+        "transformers==4.40.0",
+        "sentencepiece==0.2.0",
+        "accelerate==0.30.1",
+        "numpy==1.26.4",
+        "pandas==2.2.2",
+        "pillow==10.4.0",
+        "scipy==1.14.1",
+        "pyyaml==6.0.2",
+        "anthropic==0.42.0",
+        "huggingface_hub==0.23.5",
+        *_chexagent_deps,
+    )
+    .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
+)
+
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git", "libgl1", "libglib2.0-0")
@@ -60,19 +104,6 @@ image = (
         "anthropic==0.42.0",
         "scikit-image==0.24.0",
         "huggingface_hub>=0.30.0,<1.0",
-        # Required by CheXagent-2-3b's trust_remote_code modeling file.
-        # Added incrementally as the remote code imports surface failures.
-        "matplotlib==3.9.2",
-        "tensorflow-cpu==2.17.0",
-        "albumentations==1.4.3",
-        "albucore==0.0.13",
-        "opencv-python-headless==4.10.0.84",
-        "einops==0.8.0",
-        "timm==1.0.9",
-        # Preemptive — common transitive deps in CXR-VLM remote-code files.
-        "ftfy==6.2.3",
-        "regex==2024.9.11",
-        "protobuf==4.25.5",
     )
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
@@ -126,6 +157,66 @@ def _skip_if_exists(path: str, step: str) -> bool:
 # Day 2: RRG generation
 # ---------------------------------------------------------------------------
 
+def _load_manifest(manifest_jsonl: str) -> list[dict]:
+    import json
+    rows: list[dict] = []
+    with open(manifest_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            rows.append({"image_id": row.get("image_id") or row.get("row_id"),
+                          "image_path": row["image_path"]})
+    seen: set[str] = set()
+    dedup: list[dict] = []
+    for r in rows:
+        iid = str(r["image_id"])
+        if iid in seen:
+            continue
+        seen.add(iid)
+        dedup.append(r)
+    return dedup
+
+
+@app.function(
+    image=image_chexagent,
+    gpu=_H100,
+    timeout=60 * 60 * 2,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def rrg_generation_chexagent(
+    manifest_jsonl: str = "/data/groundbench_v5/all/groundbench_v5_test.jsonl",
+    out_jsonl: str = "/data/v6_rrg/generations.jsonl",
+    max_images: int = 500,
+) -> dict:
+    """CheXagent-2-3b only, on the transformers-4.40.0 image. Safe to run
+    immediately — CheXagent weights are MIT-licensed and require no gated access."""
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+
+    from v5.eval.rrg_generate import CheXagentV2Generator, run_rrg_sweep
+    try:
+        generators = [CheXagentV2Generator(device="cuda")]
+    except Exception as exc:
+        payload = {"status": "failed", "reason": f"chexagent load failed: {exc}"}
+        _write_status("rrg_generation_chexagent", payload)
+        return payload
+
+    counts = run_rrg_sweep(
+        generators=generators,
+        manifest=_load_manifest(manifest_jsonl),
+        image_root=P("/data"),
+        out_jsonl=P(out_jsonl),
+        max_images=max_images,
+    )
+    payload = {"status": "ok", "counts": counts, "output": out_jsonl}
+    _write_status("rrg_generation_chexagent", payload)
+    return payload
+
+
 @app.function(
     image=image,
     gpu=_H100,
@@ -138,41 +229,32 @@ def rrg_generation(
     out_jsonl: str = "/data/v6_rrg/generations.jsonl",
     max_images: int = 500,
 ) -> dict:
+    """MAIRA-2 + MedGemma-4B-IT on the transformers-4.51.3 image. Requires
+    the user to have accepted the HF gated-repo licenses; otherwise both
+    loaders fall through with 403 and the function emits an empty counts
+    dict.
+    """
     import sys
     sys.path.insert(0, "/root/verifact")
     from pathlib import Path as P
-    import json
 
-    if _skip_if_exists(out_jsonl, "rrg_generation"):
-        return {"status": "skipped"}
+    from v5.eval.rrg_generate import MAIRA2Generator, MedGemma4BGenerator, run_rrg_sweep
+    generators = []
+    for name, ctor in [("maira-2", MAIRA2Generator), ("medgemma-4b-it", MedGemma4BGenerator)]:
+        try:
+            generators.append(ctor(device="cuda"))
+            print(f"[rrg_generation] loaded {name}")
+        except Exception as exc:
+            print(f"[rrg_generation] {name} load failed: {exc}")
 
-    from v5.eval.rrg_generate import build_default_generators, run_rrg_sweep
-    generators = build_default_generators(device="cuda")
     if not generators:
-        payload = {"status": "failed", "reason": "no RRG generators loaded"}
+        payload = {"status": "failed", "reason": "no gated RRG generators loaded — check HF licenses"}
         _write_status("rrg_generation", payload)
         return payload
 
-    manifest_rows: list[dict] = []
-    with open(manifest_jsonl) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            manifest_rows.append({"image_id": row.get("image_id") or row.get("row_id"),
-                                   "image_path": row["image_path"]})
-    seen: set[str] = set()
-    dedup: list[dict] = []
-    for r in manifest_rows:
-        iid = str(r["image_id"])
-        if iid in seen:
-            continue
-        seen.add(iid)
-        dedup.append(r)
     counts = run_rrg_sweep(
         generators=generators,
-        manifest=dedup,
+        manifest=_load_manifest(manifest_jsonl),
         image_root=P("/data"),
         out_jsonl=P(out_jsonl),
         max_images=max_images,
