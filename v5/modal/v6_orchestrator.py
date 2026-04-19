@@ -64,7 +64,8 @@ image = (
         # Added incrementally as the remote code imports surface failures.
         "matplotlib==3.9.2",
         "tensorflow-cpu==2.17.0",
-        "albumentations==1.4.15",
+        "albumentations==1.4.3",
+        "albucore==0.0.13",
         "opencv-python-headless==4.10.0.84",
         "einops==0.8.0",
         "timm==1.0.9",
