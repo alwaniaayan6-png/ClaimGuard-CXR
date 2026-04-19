@@ -111,6 +111,12 @@ def train_text_only_classifier(
         evids = [str(r.get("evidence_text", "")) for r in rows]
         labels = [1 if r.get("gt_label") == "CONTRADICTED" else 0 for r in rows]
         if include_weights and weights_by_idx:
+            if max(weights_by_idx.keys(), default=-1) >= len(rows):
+                raise ValueError(
+                    f"HO weights index {max(weights_by_idx.keys())} exceeds filtered-rows "
+                    f"length {len(rows)}; rows must be the HO-filter's resolved-GT subset in "
+                    f"the original JSONL order"
+                )
             ws = [weights_by_idx.get(i, 1.0) for i in range(len(rows))]
         else:
             ws = [1.0] * len(rows)

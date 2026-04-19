@@ -402,9 +402,22 @@ def assemble_v6_3site(
                 rows.append(json.loads(line))
         return rows
 
-    all_rows = _load(openi_jsonl) + _load(chestx_jsonl) + _load(padchest_gr_jsonl)
-    if not all_rows:
-        return {"status": "failed", "reason": "all three sites missing"}
+    openi_rows = _load(openi_jsonl)
+    chestx_rows = _load(chestx_jsonl)
+    padchest_rows = _load(padchest_gr_jsonl)
+    per_site = {
+        "openi": len(openi_rows),
+        "chestx_det10": len(chestx_rows),
+        "padchest_gr": len(padchest_rows),
+    }
+    sites_present = [k for k, n in per_site.items() if n > 0]
+    if len(sites_present) < 2:
+        return {"status": "failed", "reason": "fewer than 2 sites present",
+                "per_site": per_site}
+    if len(sites_present) < 3:
+        print(f"[assemble_v6_3site] WARNING: only {len(sites_present)} sites present "
+              f"({sites_present}) — the 3-site headline cannot be reported")
+    all_rows = openi_rows + chestx_rows + padchest_rows
 
     def _patient_key(r: dict) -> str:
         return str(r.get("patient_id") or r.get("study_id") or r.get("image_id") or "")
@@ -443,7 +456,8 @@ def assemble_v6_3site(
     finally:
         for f in fhs.values():
             f.close()
-    payload = {"status": "ok", "counts": counts, "n_patients": len(patients), "out_dir": str(out)}
+    payload = {"status": "ok", "counts": counts, "n_patients": len(patients),
+               "per_site": per_site, "sites_present": sites_present, "out_dir": str(out)}
     _write_status("assemble_v6_3site", payload)
     return payload
 
