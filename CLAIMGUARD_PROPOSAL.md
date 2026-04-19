@@ -1,5 +1,7 @@
 # ClaimGuard-CXR: Claim-Level Verification and Conformal False Discovery Rate Control for Radiology Report Generation
 
+> **⚠️ SUPERSEDED BY v6.0 (2026-04-19)** — The authoritative current specification is **`ARCHITECTURE_V6_0_NEURIPS_MAIN.md`** with companion **`PLAN_V6_17DAY_NEURIPS.md`** (17-day sprint to NeurIPS 2026 Evaluations & Datasets track, deadline 2026-05-06). This proposal document is retained as historical record only. Do NOT use the sections below for current design decisions.
+
 **Target venue (v2 pivot, 2026-04-17):** npj Digital Medicine or Medical Image Analysis (primary); Nature Communications (stretch); Nature Machine Intelligence (only if radiology co-author + PhysioNet credentialing land).
 
 Historical target (v1): NeurIPS 2026 main conference. The v4 sprint (2026-04-15) completed enough of the text-only pipeline to ship a workshop paper, but the HO-gap result and "silver-standard" grounding means the text-only story cannot reach a Nature-family venue. See `ARCHITECTURE_PATH_B.md` for the image-grounded pivot that replaces this proposal's V1 framing.
