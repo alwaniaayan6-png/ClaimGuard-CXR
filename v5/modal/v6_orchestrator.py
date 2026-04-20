@@ -273,6 +273,96 @@ def rrg_generation(
 
 @app.function(
     image=image,
+    cpu=2,
+    timeout=60 * 60 * 2,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def decompose_rrg_claims(
+    rrg_jsonl: str = "/data/v6_rrg/generations.jsonl",
+    manifest_jsonl: str = "/data/groundbench_v5/all/groundbench_v5_test.jsonl",
+    out_claims_jsonl: str = "/data/v6_silver/claims.jsonl",
+    out_refs_jsonl: str = "/data/v6_silver/references.jsonl",
+) -> dict:
+    """Decompose RRG-generated reports into atomic claims via Claude Haiku.
+
+    Also emits a per-image reference_report JSONL sourced from the test
+    manifest's ``evidence_text`` field (where ``evidence_source_type=oracle_human``),
+    which is the original OpenI radiologist report. Both files feed the
+    silver labelers (green/radfact/vert).
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+
+    if _skip_if_exists(out_claims_jsonl, "decompose_rrg_claims"):
+        return {"status": "skipped"}
+
+    from v5.data.claim_extractor import llm_extract, rule_extract
+
+    refs: dict[str, str] = {}
+    with open(manifest_jsonl) as f:
+        for line in f:
+            r = json.loads(line)
+            iid = str(r.get("image_id") or r.get("row_id", ""))
+            if not iid or iid in refs:
+                continue
+            if r.get("evidence_source_type") != "oracle_human":
+                continue
+            text = str(r.get("evidence_text", "")).strip()
+            if text:
+                refs[iid] = text
+
+    P(out_refs_jsonl).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_refs_jsonl, "w") as f:
+        for iid, ref in refs.items():
+            f.write(json.dumps({"image_id": iid, "reference_report": ref}) + "\n")
+    print(f"[decompose] wrote {len(refs)} references")
+
+    claims_out: list[dict] = []
+    n_gens, n_rule_fallback, n_skipped_no_ref = 0, 0, 0
+    with open(rrg_jsonl) as f:
+        for line in f:
+            g = json.loads(line)
+            if g.get("error") or not g.get("generated_report"):
+                continue
+            image_id = str(g["image_id"])
+            if image_id not in refs:
+                n_skipped_no_ref += 1
+                continue
+            report_id = f"{image_id}__{g['model']}"
+            try:
+                claims = llm_extract(g["generated_report"], report_id=report_id,
+                                     provider="anthropic",
+                                     model="claude-haiku-4-5-20251001")
+            except Exception as exc:
+                print(f"[decompose] llm_extract failed for {image_id}: {exc}; using rule")
+                claims = rule_extract(g["generated_report"], report_id=report_id)
+                n_rule_fallback += 1
+            for c in claims:
+                claims_out.append({
+                    "claim_id": c.claim_id,
+                    "image_id": image_id,
+                    "rrg_model": g["model"],
+                    "claim_text": c.claim_text,
+                })
+            n_gens += 1
+            if n_gens % 50 == 0:
+                print(f"[decompose] {n_gens} reports processed, {len(claims_out)} claims")
+
+    with open(out_claims_jsonl, "w") as f:
+        for c in claims_out:
+            f.write(json.dumps(c) + "\n")
+    payload = {"status": "ok", "n_claims": len(claims_out), "n_reports": n_gens,
+               "n_rule_fallback": n_rule_fallback, "n_skipped_no_ref": n_skipped_no_ref,
+               "n_references": len(refs)}
+    _write_status("decompose_rrg_claims", payload)
+    return payload
+
+
+@app.function(
+    image=image,
     gpu=_H100,
     timeout=60 * 60 * 2,
     volumes={"/data": volume},
