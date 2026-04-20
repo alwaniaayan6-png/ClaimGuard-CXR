@@ -92,8 +92,13 @@ class CheXagentV2Generator(RRGGenerator):
             kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, **kwargs)
+        # Default dtype (FP32). The CheXagent remote-code image loader
+        # materializes FP32 image tensors internally and does not coordinate
+        # with the model dtype — any explicit .to(bfloat16) causes a
+        # "FP32 input vs BF16 weight" mismatch at inference. 3B params in
+        # FP32 = ~12 GB; fits comfortably on H100 80GB.
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id, device_map="auto", torch_dtype=torch.bfloat16, **kwargs,
+            self.model_id, device_map="auto", **kwargs,
         ).eval()
 
     @torch.no_grad()

@@ -353,8 +353,12 @@ class CheXagentV2Baseline(BaselineVerifier):
             kwargs["token"] = token
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, **kwargs)
+        # Default dtype (FP32). See CheXagentV2Generator for rationale: the
+        # remote-code image loader emits FP32 tensors regardless of model
+        # dtype, so explicit bfloat16 casting produces a type-mismatch at
+        # inference.
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id, device_map="auto", torch_dtype=torch.bfloat16, **kwargs,
+            self.model_id, device_map="auto", **kwargs,
         ).eval()
 
     @torch.no_grad()
