@@ -119,36 +119,72 @@ class GreenLabeler:
         return self.tokenizer.decode(gen, skip_special_tokens=True).strip()
 
     def _parse_response(self, response: str) -> tuple[float, int, list[str]]:
-        """Extract GREEN score, total significant-error count, and triggered categories."""
-        score = 0.5
-        m = re.search(r"(?:GREEN\s*score|score)[:\s=]+(-?[0-9]*\.?[0-9]+)", response, re.IGNORECASE)
-        if m:
-            try:
-                score = max(0.0, min(1.0, float(m.group(1))))
-            except ValueError:
-                pass
+        """Parse GREEN's actual output format.
 
+        GREEN emits sections like:
+
+            [Clinically Significant Errors]:
+            (a) False report of a finding in the candidate: 2.
+            (b) Missing a finding: 0.
+            (c) Omitting prior comparison: 0.
+            (d) Misassessment of severity: 1.
+            (e) Mention of comparison: 0.
+            (f) Omitting prior comparison: 0.
+
+            [Clinically Insignificant Errors]:
+            (a) ...
+
+            [Matched Findings]:
+            1. Calcified granuloma in the right upper lobe.
+            2. ...
+
+        For per-claim silver labeling:
+          * (a) False report > 0 -> strong hallucination signal -> CONTRADICTED
+          * (d) Misassessment of severity > 0 -> hallucination signal
+          * Claim appears in [Matched Findings] (>= 1 numbered item in that
+            section) and no (a)/(d) errors -> SUPPORTED
+          * Neither -> UNCERTAIN
+
+        Score is computed as the GREEN paper's precision-flavored ratio:
+        matched / (matched + significant_errors) in per-claim mode.
+        """
+        # (a) False report count under [Clinically Significant Errors]
+        sig_section = re.search(
+            r"\[Clinically\s+Significant\s+Errors\]\s*:(.*?)(?=\[|$)",
+            response, re.IGNORECASE | re.DOTALL,
+        )
+        n_false = 0
+        n_severity = 0
         triggered: list[str] = []
-        patterns = {
-            "false_finding": r"1\.\s*false\s+finding[^\n]*?(\d+)",
-            "missing_finding": r"2\.\s*missing\s+finding[^\n]*?(\d+)",
-            "anatomic_location_error": r"3\.\s*anatomic[^\n]*?(\d+)",
-            "severity_error": r"4\.\s*severity[^\n]*?(\d+)",
-            "extraneous_comparison": r"5\.\s*extraneous[^\n]*?(\d+)",
-            "omitted_prior_comparison": r"6\.\s*omitted[^\n]*?(\d+)",
-        }
-        n_sig = 0
-        for cat, pat in patterns.items():
-            mm = re.search(pat, response, re.IGNORECASE)
-            if mm:
-                try:
-                    n = int(mm.group(1))
-                except ValueError:
-                    continue
-                if n > 0:
-                    triggered.append(cat)
-                    if cat in _SIGNIFICANT_CATEGORIES:
-                        n_sig += n
+        if sig_section:
+            block = sig_section.group(1)
+            m_a = re.search(r"\(a\)\s*[Ff]alse[^\n:]*:\s*(\d+)", block)
+            if m_a:
+                n_false = int(m_a.group(1))
+                if n_false > 0:
+                    triggered.append("false_finding")
+            m_d = re.search(r"\(d\)\s*[Mm]isassessment[^\n:]*:\s*(\d+)", block)
+            if m_d:
+                n_severity = int(m_d.group(1))
+                if n_severity > 0:
+                    triggered.append("severity_error")
+
+        # Count matched findings (numbered items under [Matched Findings])
+        matched_section = re.search(
+            r"\[Matched\s+Findings\]\s*:(.*?)(?=\[|</s>|$)",
+            response, re.IGNORECASE | re.DOTALL,
+        )
+        n_matched = 0
+        if matched_section:
+            n_matched = len(re.findall(
+                r"^\s*\d+\.\s+\S", matched_section.group(1), re.MULTILINE,
+            ))
+
+        n_sig = n_false + n_severity
+        if n_matched + n_sig > 0:
+            score = float(n_matched) / float(n_matched + n_sig)
+        else:
+            score = 0.5
         return score, n_sig, triggered
 
     def label_claim(
