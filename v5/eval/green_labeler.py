@@ -119,7 +119,7 @@ class GreenLabeler:
     def _parse_response(self, response: str) -> tuple[float, int, list[str]]:
         """Extract GREEN score, total significant-error count, and triggered categories."""
         score = 0.5
-        m = re.search(r"(?:GREEN\s*score|score)[:\s=]+([0-9]*\.?[0-9]+)", response, re.IGNORECASE)
+        m = re.search(r"(?:GREEN\s*score|score)[:\s=]+(-?[0-9]*\.?[0-9]+)", response, re.IGNORECASE)
         if m:
             try:
                 score = max(0.0, min(1.0, float(m.group(1))))
