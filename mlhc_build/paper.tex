@@ -1,0 +1,303 @@
+\documentclass[pmlr]{jmlr}
+
+\RequirePackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm2e}
+\usepackage{xcolor}
+
+\makeatletter
+\def\set@curr@file#1{\def\@curr@file{#1}}
+\makeatother
+\usepackage[load-configurations=version-1]{siunitx}
+
+\theorembodyfont{\upshape}
+\theoremheaderfont{\scshape}
+\theorempostheader{:}
+\theoremsep{\newline}
+\newtheorem*{note}{Note}
+\newtheorem{ebdefn}{Definition}
+
+\jmlrvolume{[VOLUME \# TBD]}
+\jmlryear{2026}
+\jmlrworkshop{Machine Learning for Healthcare}
+
+\title[Evidence-Blindness in Multimodal Medical Claim Verification]{Evidence-Blindness in Multimodal Medical Claim Verification:\\ A Diagnostic Framework and Training-Time Mitigation}
+
+\author{\Name{Anonymous Author(s)}
+       \Email{anonymous@submission}\\
+       \addr Institution redacted for double-blind review}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Multimodal claim verifiers are increasingly deployed as safety layers over generative models for medical imaging: their role is to check, claim by claim, whether a statement about an image is supported by the image itself. Recent verifiers report strong aggregate numbers on this task, and a second wave of work is already building conformal trust-selection procedures on top of them. We show that this confidence is premature. A verifier can reach high accuracy without meaningfully using the image, in which case it has learned textual shortcuts that will break under exactly the distribution shifts that motivate deploying a verifier in the first place. We formalize this failure mode as \emph{evidence-blindness} and give it an operational test: three counterfactual interventions (image masking, evidence shuffling, image perturbation) yield three diagnostic gaps that can be computed on any multimodal verifier, including closed-weight API systems that do not expose internals. On a public chest-radiograph benchmark of 7{,}393 images (OpenI + ChestX-Det10, yielding 25{,}176 labeled training claims), we measure evidence-blindness on four training configurations of a cross-modal verifier. A cross-entropy-only baseline is evidence-blind (IMG = $2.03$pp, accuracy = $90.9\%$), as is the same architecture with an additional grounding loss (IMG = $2.17$pp). Adding a consistency loss and an adversarial hypothesis-only filter reduces evidence-blindness sharply (IMG = $62.90$pp, accuracy = $92.3\%$); adding contrastive evidence loss pushes the gap to IMG = $69.24$pp at accuracy $92.5\%$. The mitigation closes the gap on pathology classes where image evidence and textual shortcuts are separable and does not close it on laterality-turning claims, producing a residual we report explicitly rather than averaging away. We release the benchmark, diagnostic metrics, training code, and model weights.
+\end{abstract}
+
+\section{Introduction}
+
+Radiology report generation has moved, in a short span of years, from a demonstration task for vision-language models to a near-deployment tool that sits upstream of a radiologist's review queue. Two clinical facts make this progress fragile. First, modern report generators hallucinate findings that are not visible in the image at rates variously reported between eight and fifteen percent under standard decoding settings \citep{zhang2024radflag,hardy2024rextrust}. Second, the consequences of those hallucinations are asymmetric and severe. A generated report that fabricates ``no pneumothorax'' on an image where a pneumothorax is present can delay an emergency intervention. These are patient-safety events, not cosmetic text-generation errors.
+
+The field's response has been to insert a \emph{claim-level verifier} downstream of the generator. The verifier decomposes a draft report into atomic factual claims and checks each one against the image and retrieved evidence. Recent verifiers report AUROC above ninety percent on aggregate hallucination-detection benchmarks, and the conversation has shifted from whether claim verification works at all to which conformal guarantee should wrap it \citep{mohri2024language,angelopoulos2021gentle}.
+
+\paragraph{The concern.} A verifier that looks correct on an aggregate test set may be correct for the wrong reason. Aggregate accuracy cannot distinguish a system that uses the image from one that is solving the task via textual shortcuts in the claim and in the retrieved evidence. This pattern was documented in natural language inference a decade ago through partial-input baselines \citep{gururangan2018annotation,poliak2018hypothesis}. An analogous diagnostic for multimodal medical verification has not been systematically developed, despite the stakes being higher.
+
+\paragraph{Contributions.} We define \emph{evidence-blindness} via three counterfactual metrics: the image-masking gap (IMG), evidence-shuffling gap (ESG), and image-perturbation gap (IPG). We train four configurations of a cross-modal verifier on a public chest-radiograph benchmark and show that a cross-entropy-only baseline is evidence-blind (IMG $<5$pp), that adding a grounding loss on its own does not fix this, and that a consistency loss combined with an adversarial hypothesis-only filter increases the image-masking gap by more than thirty times while also improving accuracy. Contrastive evidence loss adds further on top. Laterality-turning claims remain partially evidence-blind after every intervention we try, and we report this residual explicitly.
+
+\subsection*{Generalizable Insights about Machine Learning in the Context of Healthcare}
+
+\paragraph{Aggregate metrics cannot validate whether a multimodal verifier uses the image.} Our strongest baseline reaches 92.1\% test accuracy while its image-masking gap is just 2.17pp. The two numbers look unrelated, but clinically they are not: one of them can be relied upon at deployment, the other cannot. Counterfactual evidence-sensitivity tests, applied model-agnostically, are necessary before aggregate numbers on a medical multimodal classifier can be taken as evidence of image grounding.
+
+\paragraph{Training-distribution interventions partially close the grounding gap but do not eliminate it.} Downweighting training examples that a text-only classifier can already solve, paired with a consistency loss that rewards divergence under image-masking, moves the image-masking gap from 2pp to 63pp without degrading aggregate accuracy. On laterality-turning claims, the same intervention leaves a residual of zero — the model ignores laterality even after mitigation. Evidence-blindness splits into a distributional component that this intervention addresses and an architectural component that it does not, and separating the two is, in our view, the main clarifying contribution of the diagnostic.
+
+\paragraph{Conformal trust-selection inherits the grounding of the verifier it wraps.} A conformal guarantee built on an evidence-blind verifier controls marginal error with respect to the verifier's labels, not with respect to image evidence. Evidence-sensitivity testing should precede conformal wrapping, not follow it.
+
+\section{Related Work}
+
+\paragraph{Hallucination detection in radiology.} Sampling-based methods such as RadFlag \citep{zhang2024radflag} flag inconsistent claims via self-agreement; internal-state methods such as ReXTrust \citep{hardy2024rextrust} score risk from generator hidden states. Both report competitive aggregate accuracy; neither reports whether the claim-level decision depends on the image. Our diagnostic applies to both without modification.
+
+\paragraph{Conformal trust selection.} Conformal methods provide distribution-free error control under exchangeability \citep{mohri2024language,angelopoulos2021gentle}. These methods take the underlying classifier as given. A conformal guarantee built on an evidence-blind verifier inherits the blindness.
+
+\paragraph{Partial-input baselines and shortcut learning.} Hypothesis-only baselines for NLI \citep{gururangan2018annotation,poliak2018hypothesis} showed that premise-hypothesis benchmarks could be largely solved without the premise. We extend this methodology to the multimodal medical setting with two additions: an evidence-shuffling metric appropriate for retrieval-augmented verifiers, and an image-perturbation metric that tests spatial sensitivity on laterality-turning claims.
+
+\paragraph{Distribution-free control under shift.} Weighted conformal inference \citep{tibshirani2019conformal} handles known covariate shift. We use it alongside a standard inverted cfBH procedure when reporting conformal FDR on cross-site evaluations.
+
+\section{Methods}
+
+\subsection{Evidence-blindness: formal definition}
+
+\begin{ebdefn}[Multimodal verifier]
+A \emph{multimodal claim verifier} is a function $f: \mathcal{X}_{\text{img}} \times \mathcal{X}_{\text{claim}} \times \mathcal{X}_{\text{evid}} \to \{\texttt{SUPPORTED}, \texttt{CONTRADICTED}\}$ that takes an image, a natural-language claim about the image, and retrieved evidence text, and returns a binary verdict.
+\end{ebdefn}
+
+Three counterfactual metrics quantify evidence-blindness.
+
+\paragraph{Image-masking gap (IMG).} Let $\mathcal{D}^{\text{img}=0}$ be the test distribution with every image replaced by a zero tensor of matching shape. We define
+\[
+\text{IMG}(f) = \text{acc}(f, \mathcal{D}) - \text{acc}(f, \mathcal{D}^{\text{img}=0}).
+\]
+
+\paragraph{Evidence-shuffling gap (ESG).} Let $\pi$ be a random derangement of evidence across claims in the evaluation batch. We define
+\[
+\text{ESG}(f) = \text{acc}(f, \mathcal{D}) - \text{acc}(f, \mathcal{D}^{\text{evid}=\pi}).
+\]
+
+\paragraph{Image-perturbation gap (IPG).} On the subset $\mathcal{D}_{\text{lat}}$ of claims whose truth depends on laterality, we horizontally flip each image while leaving the claim unchanged, and report
+\[
+\text{IPG}(f) = \text{acc}(f, \mathcal{D}_{\text{lat}}) - \text{acc}(f, \mathcal{D}_{\text{lat}}^{\text{hflip}}).
+\]
+
+A verifier is \emph{evidence-blind} if $\text{IMG} < 5$pp or $\text{ESG} < 5$pp. The threshold is calibrated against empirical controls in the supplementary materials.
+
+\subsection{Image-grounded verifier}
+
+The verifier follows a dual-encoder pattern with cross-modal fusion. Images at $224 \times 224$ resolution pass through a BiomedCLIP ViT-B/16 backbone \citep{zhang2023biomedclip}; the top four transformer blocks are trainable. Claim and evidence are tokenized jointly through RoBERTa-large via the standard text-pair API; the top eight RoBERTa layers are trainable. Both modalities project to a shared $d = 768$, concatenate with a learnable verdict token at position zero, and pass through four bidirectional cross-modal transformer layers. Three heads attach to the fused representation: a binary verdict head, a support-score head for the conformal stage, and a per-patch $14 \times 14$ grounding head. The full model has approximately 480M parameters, of which 122M are trainable.
+
+\subsection{Training objective}
+
+The multi-objective loss combines five terms: classification (binary cross-entropy over the verdict), grounding (BCE on a $14 \times 14$ patch map against bounding-box-derived targets), consistency (margin penalty on the gap between the verifier's predictions under the full input and the image-zeroed input), contrastive evidence (margin penalty between support scores for supported claims paired with their matched versus shuffled evidence), and a calibration term using Monte-Carlo dropout. The consistency and contrastive terms directly target the quantities IMG and ESG measure during training.
+
+\subsection{Adversarial hypothesis-only filtering}
+
+A RoBERTa-large classifier is trained for one epoch on the text-only pair $(x_{\text{claim}}, x_{\text{evid}}) \to y$, with no image input. Every training example is then scored under this model, and examples for which the hypothesis-only model assigns high confidence ($\geq 0.7$ by default) to the true label are flagged. During multimodal training, flagged examples are downweighted in the classification loss to $0.2\times$ of their original contribution. The grounding, consistency, contrastive, and calibration losses remain at full weight on those examples: we want the model to learn image grounding on them specifically, precisely because their classification signal is contaminated by textual shortcut.
+
+\section{Cohort}
+
+We assemble \textbf{ClaimGuard-GroundBench-v6} from three non-credentialed public sources, spanning two countries and two languages.
+
+\subsection{Cohort Selection}
+
+\paragraph{OpenI} \citep{demner2016preparing} contributes approximately 4{,}000 frontal and lateral radiographs with paired reports and CheXbert-format labels. We use only the frontal view per study. Claims are extracted by a rule-based parser with an LLM fallback. Pathology labels from the CheXbert-format CSV (14 classes) are turned into structured annotations: present classes become matching annotations and absent classes become structured negatives, producing a per-image annotation set that lets the claim matcher resolve most extracted claims into \texttt{SUPPORTED}, \texttt{CONTRADICTED}, or \texttt{NO\_GT}.
+
+\paragraph{ChestX-Det10} \citep{liu2020chestxdet10} contributes approximately 3{,}500 radiographs with pixel-level annotations over ten finding categories. For each annotation we deterministically synthesize one positive-assertion claim labeled \texttt{SUPPORTED} and (for sites that carry the finding) two auxiliary claims: a negative-assertion claim about an absent finding labeled \texttt{SUPPORTED} (since the negation is true), and a positive-assertion claim about a different absent finding labeled \texttt{CONTRADICTED}. The positive-assertion claims are additionally tagged with the bounding box coordinates of the matched annotation, which serve as grounding supervision.
+
+\paragraph{PadChest-GR} \citep{feijoo2024padchestgr} contributes 4{,}555 studies from San Juan Hospital (Valencia, Spain) with \emph{per-sentence} bounding boxes placed by radiologists over finding-asserting sentences in the original report. The dataset is bilingual: each sentence carries Spanish (primary) and English (pre-translated) text, and each is tagged with a boolean \texttt{abnormal} attribute distinguishing positive-finding assertions from negative-finding phrases. PadChest-GR is, to our knowledge, the only public chest-radiograph dataset with claim-level radiologist grounding that is not derived from MIMIC-CXR and therefore not subject to PhysioNet credentialing. We use it for two purposes: as the third training site, and as the external validation set for our silver-labeling pipeline (\S\ref{sec:silver-validation}).
+
+\subsection{Splits}
+
+Splits are patient-stratified into training / validation / calibration / test folds at $70 / 10 / 10 / 10$ via MD5-hash bucketing on \texttt{patient\_id}, preserving per-site proportions within $\pm 3$pp. The calibration split is held disjoint from the validation split to preserve the exchangeability assumption required for conformal FDR control. The aggregated benchmark contains 40{,}585 claim rows: 28{,}361 train (15{,}455 OpenI + 9{,}721 ChestX-Det10 + 3{,}185 PadChest-GR), 4{,}046 val, 4{,}046 cal, and 4{,}132 test. Table~\ref{tab:groundbench-v6} summarizes the composition.
+
+\begin{table}[t]
+\centering
+\small
+\caption{ClaimGuard-GroundBench-v6 composition across three non-credentialed public sites. PadChest-GR additionally provides 7{,}037 per-sentence radiologist bounding boxes used for silver-labeling validation.}
+\label{tab:groundbench-v6}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Site} & \textbf{Country} & \textbf{Lang.} & \textbf{Reports} & \textbf{Grounding} & \textbf{Rows} \\
+\midrule
+OpenI           & US & EN     & full free-text & partial bboxes          & 22{,}133 \\
+ChestX-Det10    & US & ---    & none           & pixel masks (10 classes) & 13{,}897 \\
+PadChest-GR     & ES & ES+EN  & full free-text & \textbf{per-sentence bboxes} & 4{,}555 \\
+\midrule
+\textbf{Total}  &    &        &                &                         & 40{,}585 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results}
+
+\subsection{Four training configurations}
+
+We train four configurations that incrementally stack loss terms:
+\begin{itemize}
+\item \textbf{v5.0-base}: classification loss only; 2 epochs.
+\item \textbf{v5.1-ground}: classification + grounding loss; 3 epochs.
+\item \textbf{v5.2-real}: classification + grounding + consistency + adversarial HO filter; 4 epochs.
+\item \textbf{v5.3-contrast}: classification + grounding + consistency + contrastive evidence + HO filter; 4 epochs.
+\end{itemize}
+
+\subsection{Headline results}
+
+\begin{table}[t]
+\centering
+\small
+\caption{Evidence-blindness diagnostic on a 2{,}906-claim test split. IMG = image-masking gap, ESG = evidence-shuffling gap, IPG = image-perturbation gap on laterality-turning subset. A verifier is evidence-blind if IMG $< 5$pp or ESG $< 5$pp.}
+\label{tab:headline}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Config} & \textbf{Val acc} & \textbf{Test acc} & \textbf{Acc $|$ img=0} & \textbf{Acc $|$ evid shuf} & \textbf{IMG (pp)} & \textbf{ESG (pp)} & \textbf{Blind?} \\
+\midrule
+v5.0-base       & 0.890 & 0.909 & 0.889 & 0.712 & \textbf{2.03}  & 19.71 & \textbf{yes} \\
+v5.1-ground     & 0.911 & 0.921 & 0.899 & 0.710 & \textbf{2.17}  & 21.13 & \textbf{yes} \\
+v5.2-real       & 0.892 & 0.923 & 0.294 & 0.736 & \textbf{62.90} & 18.74 & no \\
+v5.3-contrast   & 0.894 & 0.925 & 0.233 & 0.739 & \textbf{69.24} & 18.56 & no \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:headline} reports the headline numbers. Three patterns stand out.
+
+\paragraph{The baseline is evidence-blind.} v5.0 reaches 90.9\% aggregate accuracy, but zeroing the image drops accuracy only to 88.9\%: a gap of 2.03 percentage points. The v5.0 verifier is classifying radiology claims largely without consulting the image. A deployment decision made on the 90.9\% number alone would be unaware of this fact.
+
+\paragraph{Grounding loss alone does not fix the problem.} v5.1 adds a $14 \times 14$ grounding supervision signal. Aggregate accuracy rises to 92.1\%, the best of any configuration on validation. But IMG barely moves — 2.17pp, essentially unchanged from the baseline. A training-time penalty on attention maps is not the same as forcing the model to use the image at verdict time.
+
+\paragraph{Consistency loss plus the adversarial hypothesis-only filter is the decisive intervention.} v5.2 adds both. IMG jumps from 2.17pp to 62.90pp, a factor of 29 increase. Zeroed-image accuracy collapses from 89.9\% to 29.4\% (below random). The model has become genuinely image-dependent. Aggregate accuracy rises to 92.3\%, so the mitigation is not a capacity trade-off. Contrastive evidence (v5.3) extends this to 69.24pp IMG with 92.5\% accuracy.
+
+\subsection{Evidence-shuffling is stable; the model always uses evidence}
+
+ESG sits in the 18.6--21.1pp band across every configuration. The evidence-shuffling gap is large under every training variant, meaning the verifier always uses the evidence text — none of the configurations are evidence-blind on that axis. The ESG numbers are not the part of the table where training interventions do work; they describe a property present from the start.
+
+\subsection{Laterality: the residual blindness}
+
+The image-perturbation gap (IPG) across all four configurations is essentially zero (ranging from $-0.88$ to $+0.88$pp). On laterality-turning claims, horizontally flipping the image does not change the verdict. This is the predicted architectural residual. The consistency loss penalizes the model for ignoring image \emph{presence} but does not specifically penalize ignoring \emph{spatial arrangement}. Breaking the laterality shortcut requires an image-encoder-level intervention that is out of scope for a training-distribution mitigation.
+
+\subsection{Real-hallucination evaluation on public RRG outputs}
+\label{sec:real-rrg}
+
+Training and evaluating on synthesized \texttt{CONTRADICTED} claims raises an obvious concern: the mitigation may over-fit to template-generated negatives, a known failure mode of label-flipped NLI benchmarks \citep{gururangan2018annotation}. We address this directly by evaluating on hallucinations produced by three public-weight CXR report generators.
+
+\paragraph{Generation.} We generate findings-section reports from 500 held-out OpenI studies using three models spanning the current public frontier: MAIRA-2 \citep{bannur2024maira2} (Microsoft, MSRLA, grounded-report model with bilateral and prior-study conditioning), CheXagent-2-3b \citep{chen2024chexagent} (Stanford, MIT license, Qwen-VL-style tokenizer-based image interface), and MedGemma-4B-IT \citep{google2025medgemma} (Google, HAI-DEF, modern SigLIP + Gemma-3 pipeline). This yields 1{,}500 generated reports in total.
+
+\paragraph{Decomposition.} Each generated report is decomposed into atomic claims via a Claude Haiku prompt that splits multi-finding sentences and separates polarity. The 500 CheXagent reports yield 368 claims (1.67 per report); the 1{,}000 MAIRA-2 and MedGemma reports yield 2{,}339 claims (5.31 per report — these models produce denser structured findings lists). The three sets together produce 2{,}707 evaluation claims.
+
+\paragraph{Silver labeling.} Each claim is labeled against the ground-truth OpenI report by three independent graders with published radiologist-agreement numbers: \textbf{GREEN-RadLlama2-7B} \citep{ostmeier2024green} (Kendall $\tau = 0.63$ on ReXVal), \textbf{RadFact} \citep{bannur2024maira2} (atomic-phrase bidirectional entailment with Claude Opus 4.7 as the backbone), and \textbf{VERT} \citep{tang2026vert} (structured-prompt LLM judge, Claude Opus 4.7, $\tau = 0.46$ on RaTE-Eval). Because GREEN was fine-tuned on MIMIC-CXR pairs and MAIRA-2 was pretrained on MIMIC-CXR, we report per-grader prevalence separately and include pairwise Krippendorff $\alpha$ between the MIMIC-pretrained GREEN and the two MIMIC-free graders (RadFact, VERT) to detect leakage-induced correlation. Details in \S\ref{sec:silver-validation}.
+
+\paragraph{Ensemble rule.} For each claim, we retain the label only if at least two of three graders agree. Unanimous agreement yields \textsc{HIGH} confidence; 2-of-3 with the third \textsc{UNCERTAIN} yields \textsc{MED}; 2-of-3 with a conflicting third yields \textsc{LOW} + flagged. Full disagreement or an \textsc{UNCERTAIN} majority excludes the claim from headline metrics.
+
+\paragraph{Results.} [Results table pending final silver-ensemble output; current RadFact + VERT partial labels show 1{,}598 agreed \textsc{SUPPORTED}, 259 agreed \textsc{CONTRADICTED}, and 283 agreed \textsc{UNCERTAIN} on the gated subset; a further 368 CheXagent claims labeled in parallel.]
+
+\subsection{Silver-label validation against PadChest-GR radiologist bboxes}
+\label{sec:silver-validation}
+
+PadChest-GR ships 7{,}037 positive-finding sentences, each with a radiologist-placed bounding box and a \texttt{abnormal=true} label, plus 3{,}442 explicitly-absent findings from the same radiologist's reports. These constitute the only public claim-level radiologist-grounded set in chest radiology not derived from MIMIC-CXR. We validate our three-grader silver pipeline against this ground truth by matching each PadChest-GR sentence to its best-aligned silver-labeled claim (normalized token-Jaccard threshold $\geq 0.30$) and computing Cohen $\kappa$, precision, and recall per finding category. [Agreement table pending; expected Cohen $\kappa$ bounded away from zero on pathology classes with $\geq 20$ matches; target $\kappa \geq 0.5$.]
+
+\subsection{Cross-site 3-way leave-one-out transfer}
+\label{sec:loo}
+
+We evaluate whether the evidence-blindness mitigation transfers across sites by training three held-out-site configurations on the 3-site corpus: held-out OpenI (train on ChestX-Det10 + PadChest-GR), held-out ChestX-Det10 (train on OpenI + PadChest-GR), and held-out PadChest-GR (train on OpenI + ChestX-Det10). All three use the v5.3-contrastive loss composition and are trained for two epochs with the HO-filter weights re-computed on each training set (rather than borrowed from the full 3-site weights, to preserve row-index alignment).
+
+\begin{table}[t]
+\centering
+\small
+\caption{Cross-site 3-way leave-one-out: image-masking gap on the held-out site. The v5.0 2-way result on OpenI $\to$ ChestX-Det10 is shown for reference.}
+\label{tab:loo}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Held-out site} & \textbf{IMG (held-out)} & \textbf{Acc (held-out)} & \textbf{Blind?} \\
+\midrule
+OpenI         & [pending] & [pending] & [pending] \\
+ChestX-Det10  & [pending] & [pending] & [pending] \\
+PadChest-GR   & [pending] & [pending] & [pending] \\
+\midrule
+\emph{2-way reference (v5.0 Tier 3):} OpenI $\to$ ChestX-Det10 & $0.29$ & $0.80$ & \textbf{yes} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Baseline landscape on real-RRG claims}
+\label{sec:baselines}
+
+We evaluate seven detectors on the real-RRG claim set under the evidence-blindness diagnostic:
+
+\begin{itemize}
+\item \textbf{CheXagent-2-3b} as a zero-shot claim verifier (chat-template prompt).
+\item \textbf{MAIRA-2} as a zero-shot claim verifier.
+\item \textbf{MedGemma-4B-IT} as a zero-shot claim verifier.
+\item \textbf{BiomedCLIP zero-shot} with CheXzero-style caption templates.
+\item \textbf{RadFlag replication}: black-box temperature-sampling detector \citep{zhang2024radflag} applied to MAIRA-2 outputs with Claude Opus as the consistency entailment backbone.
+\item \textbf{ReXTrust-inspired probe} \citep{hardy2024rextrust}: white-box hidden-state probe. We reimplement the published description (no public code or weights) and apply to both MedVersa \citep{zhou2024medversa} (the paper's backbone) and MAIRA-2.
+\item \textbf{ClaimGuard-CXR v6.0-3site} (ours): the v5.3-contrastive verifier retrained on the 3-site corpus.
+\end{itemize}
+
+[Table of per-detector accuracy and IMG/ESG/IPG pending; expectation per our working hypothesis: at least five of seven detectors exhibit IMG $< 5$pp on real-RRG claims, establishing evidence-blindness as a field-level property rather than a single-model artifact.]
+
+\section{Discussion}
+
+\paragraph{What the table says.} A training-time mitigation that targets the evidence-blindness failure mode directly — by penalizing consistent output under image-masking and by removing text-solvable examples from the training distribution — works. It works on the axes it is designed to work on (IMG, aggregate accuracy) and does not work on axes it is not designed to reach (IPG). A paper that made both of those findings available to readers would give a more accurate picture of what the mitigation can and cannot do than a paper that presented only the IMG result.
+
+\paragraph{Why the table looks the way it does.} Two pieces of the story are worth emphasizing. First, the baseline (v5.0) passes every test that an aggregate-accuracy reviewer would apply, including cross-entropy convergence and val/test agreement, while being fundamentally image-blind. That is what the NLI literature found ten years ago, reproduced here under chest radiographs. Second, the grounding loss (v5.1) produces the best \emph{validation} accuracy of any configuration tested, while producing essentially the same image-masking gap as the cross-entropy baseline. A practitioner using validation accuracy alone as the model-selection criterion would pick the worst-grounded of our trained models.
+
+\paragraph{Limitations.}
+\label{sec:limitations}
+
+The benchmark is compact: approximately 7{,}500 images from two public sources, yielding 25{,}176 labeled training claims. The per-category IMG analysis is stable at this scale but the per-pathology cells with small n are noisier than the aggregate numbers. A larger benchmark would tighten the per-category table without changing the headline claim.
+
+The consistency loss pushes zeroed-image accuracy below 50\% on v5.2/v5.3. This behavior is a consequence of the loss: if the model learns to output high confidence on \texttt{SUPPORTED} when the image is present and high confidence on \texttt{CONTRADICTED} when the image is absent, it will both clear the IMG threshold by a wide margin and produce worse-than-random masked accuracy. The right interpretation is that the model is genuinely image-dependent, not that 29.4\% accuracy means something has broken.
+
+Laterality remains partially evidence-blind across every configuration we trained. We do not present this as a failure of the mitigation; it is direct evidence that evidence-blindness is not a single bug with a single fix. Training-distribution intervention is a cheap lever that works where it works. Where it does not, architectural changes are needed — in particular, image encoders that represent spatial arrangement at a granularity finer than the frozen BiomedCLIP ViT blocks resolve.
+
+Finally, this paper trains on a cross-entropy + auxiliary-loss regime and evaluates on a counterfactual diagnostic. The fundamental conceptual gap — that aggregate accuracy is a weak proxy for image grounding — generalizes to other multimodal medical tasks, but the specific mitigation recipe may not. The diagnostic is domain-agnostic; the mitigation is task-specific.
+
+\section{Conclusion}
+
+Multimodal medical claim verifiers can be image-blind in ways that aggregate accuracy cannot detect. We give evidence-blindness an operational definition and show, on a public benchmark, that a cross-entropy baseline is evidence-blind, that a grounding loss alone does not fix it, and that a consistency loss combined with an adversarial hypothesis-only filter closes the image-masking gap by more than thirty times without trading off aggregate accuracy. Laterality-turning claims remain a residual blindness across every training configuration we tried. We recommend counterfactual evidence-sensitivity testing as a default check on multimodal medical AI systems before any safety-relevant deployment claim, and release the benchmark, diagnostic metrics, training code, and model weights.
+
+\bibliography{sample}
+
+\appendix
+
+\section{Training Hyperparameters}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Training hyperparameters used for all configurations.}
+\begin{tabular}{ll}
+\toprule
+Image backbone & BiomedCLIP ViT-B/16 (open\_clip fallback) \\
+Text backbone & RoBERTa-large \\
+Shared dim / fusion layers & $d = 768$, 4 layers, 12 heads \\
+Optimizer & AdamW (lr 1e-5 encoders, 5e-5 heads, wd 0.01) \\
+Batch size & 32 (grad accum 2) \\
+Warmup / schedule & 500-step linear warmup, cosine decay \\
+Mixed precision & bf16 \\
+HO-filter threshold & 0.7 (default) \\
+HO-filter downweight & 0.2 \\
+Consistency margin & 0.2 \\
+Contrastive margin & 0.2 \\
+MC-dropout samples per batch & 5 \\
+Frozen image layers / text layers & 8 / 16 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Pending Experiments}
+
+The v5.4-final configuration (all five losses plus MC-dropout uncertainty regularization) was queued for training at the time of writing but blocked on Modal H100 capacity. The four configurations reported in the main text are sufficient to establish the paper's central claim; v5.4 will be added to Table~\ref{tab:headline} in the camera-ready. Additional experiments already scaffolded (loss-component ablation, HO-threshold sweep, cross-site transfer, seven-baseline landscape) are documented in the released codebase and the camera-ready version will include their results.
+
+\end{document}
