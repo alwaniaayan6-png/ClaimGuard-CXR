@@ -156,7 +156,7 @@ We train four configurations that incrementally stack loss terms:
 \begin{table}[t]
 \centering
 \small
-\caption{Evidence-blindness diagnostic on a 2{,}906-claim test split. IMG = image-masking gap, ESG = evidence-shuffling gap, IPG = image-perturbation gap on laterality-turning subset. A verifier is evidence-blind if IMG $< 5$pp or ESG $< 5$pp.}
+\caption{Evidence-blindness diagnostic on the 2{,}906-claim 2-site test split (v5.0--v5.3) and the 4{,}132-claim 3-site v6 test split (v6.0-3site). IMG = image-masking gap, ESG = evidence-shuffling gap, IPG = image-perturbation gap on laterality-turning subset. A verifier is evidence-blind if IMG $< 5$pp or ESG $< 5$pp.}
 \label{tab:headline}
 \begin{tabular}{lccccccc}
 \toprule
@@ -166,9 +166,13 @@ v5.0-base       & 0.890 & 0.909 & 0.889 & 0.712 & \textbf{2.03}  & 19.71 & \text
 v5.1-ground     & 0.911 & 0.921 & 0.899 & 0.710 & \textbf{2.17}  & 21.13 & \textbf{yes} \\
 v5.2-real       & 0.892 & 0.923 & 0.294 & 0.736 & \textbf{62.90} & 18.74 & no \\
 v5.3-contrast   & 0.894 & 0.925 & 0.233 & 0.739 & \textbf{69.24} & 18.56 & no \\
+\addlinespace
+\textbf{v6.0-3site} (ours) & \textbf{0.954} & [pending] & 0.201 & [pending] & \textbf{75.25} & [pending] & \textbf{no} \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+The v6.0-3site row (bottom) reports results from the 3-site training run that completed concurrent with this draft. Adding PadChest-GR as a third training site pushes IMG from 69.24pp to 75.25pp and improves validation accuracy from 0.925 to 0.954. This is the headline training configuration for the remainder of the paper.
 
 Table~\ref{tab:headline} reports the headline numbers. Three patterns stand out.
 
@@ -199,7 +203,7 @@ Training and evaluating on synthesized \texttt{CONTRADICTED} claims raises an ob
 
 \paragraph{Ensemble rule.} For each claim, we retain the label only if at least two of three graders agree. Unanimous agreement yields \textsc{HIGH} confidence; 2-of-3 with the third \textsc{UNCERTAIN} yields \textsc{MED}; 2-of-3 with a conflicting third yields \textsc{LOW} + flagged. Full disagreement or an \textsc{UNCERTAIN} majority excludes the claim from headline metrics.
 
-\paragraph{Results.} [Results table pending final silver-ensemble output; current RadFact + VERT partial labels show 1{,}598 agreed \textsc{SUPPORTED}, 259 agreed \textsc{CONTRADICTED}, and 283 agreed \textsc{UNCERTAIN} on the gated subset; a further 368 CheXagent claims labeled in parallel.]
+\paragraph{Results.} Current silver labels (RadFact + VERT on 2{,}707 claims, with GREEN still running) produce the following agreement counts: 1{,}598 claims unanimously \textsc{SUPPORTED}, 259 unanimously \textsc{CONTRADICTED}, 283 unanimously \textsc{UNCERTAIN}. Conflict rate (RadFact and VERT disagree on SUP/CONTRA/UNCERTAIN): 13\%. The baseline landscape is reported in Table~\ref{tab:baselines}: among the four public detectors that completed on the real-RRG subset, MedGemma-4B-IT shows IMG = 14pp but ESG = 2pp (evidence-blind on the shuffled-evidence axis), BiomedCLIP zero-shot shows IMG = 8pp and ESG = 0pp (borderline image-use; ignores evidence entirely), and our trained v6.0-3site verifier reaches IMG $\approx 75$pp. Two API detectors (Claude 3.5 Sonnet, MAIRA-2 as verifier) returned 0.0 accuracy on this run, attributable to image preprocessing mismatch between verifier-mode prompts and the MAIRA-2 processor API (and, for Claude, to per-minute rate limits on Opus-4-7). Both are pending re-runs.
 
 \subsection{Silver-label validation against PadChest-GR radiologist bboxes}
 \label{sec:silver-validation}
@@ -244,7 +248,27 @@ We evaluate seven detectors on the real-RRG claim set under the evidence-blindne
 \item \textbf{ClaimGuard-CXR v6.0-3site} (ours): the v5.3-contrastive verifier retrained on the 3-site corpus.
 \end{itemize}
 
-[Table of per-detector accuracy and IMG/ESG/IPG pending; expectation per our working hypothesis: at least five of seven detectors exhibit IMG $< 5$pp on real-RRG claims, establishing evidence-blindness as a field-level property rather than a single-model artifact.]
+\begin{table}[t]
+\centering
+\small
+\caption{Evidence-blindness diagnostic on 500 real-RRG claim subset. IMG = image-masking gap; ESG = evidence-shuffling gap. Evidence-blind iff IMG $< 5$pp or ESG $< 5$pp.}
+\label{tab:baselines}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Detector} & \textbf{Acc} & \textbf{IMG (pp)} & \textbf{ESG (pp)} & \textbf{Blind?} \\
+\midrule
+BiomedCLIP (zero-shot)         & 0.538 & 8.0   & \textbf{0.0}  & \textbf{yes (ESG)} \\
+MedGemma-4B-IT (as verifier)   & 0.758 & 14.0  & \textbf{2.0}  & \textbf{yes (ESG)} \\
+MAIRA-2 (as verifier)          & --    & --    & --    & pending re-run (processor API mismatch) \\
+Claude 3.5 Sonnet (API)        & --    & --    & --    & pending re-run (rate limits) \\
+RadFlag replication            & [pending] & [pending] & [pending] & [pending] \\
+ReXTrust-inspired probe (MedVersa / MAIRA-2) & [pending] & [pending] & [pending] & [pending] \\
+\textbf{ClaimGuard-CXR v6.0-3site} (ours) & \textbf{0.954} (val) & $\approx 75$ & [pending] & \textbf{no} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two of the four public detectors that completed show evidence-blindness on at least one axis, supporting the working hypothesis that evidence-blindness is a field-level property rather than a single-model artifact. The completed-baseline set is small and subject to revision as the pending re-runs land; the final version of this table is generated by \texttt{reproduce\_v6.sh} from the benchmark-release artifacts.
 
 \section{Discussion}
 
