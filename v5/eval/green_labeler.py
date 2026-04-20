@@ -93,9 +93,11 @@ class GreenLabeler:
     def __init__(self, device: torch.device | str = "cuda"):
         import os
         from transformers import AutoTokenizer, AutoModelForCausalLM
-        kwargs: dict[str, Any] = {}
-        if os.environ.get("HF_TOKEN"):
-            kwargs["token"] = os.environ["HF_TOKEN"]
+        kwargs: dict[str, Any] = {"trust_remote_code": True}
+        for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
+            if os.environ.get(k):
+                kwargs["token"] = os.environ[k]
+                break
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, **kwargs)
         if self.tokenizer.pad_token is None:
