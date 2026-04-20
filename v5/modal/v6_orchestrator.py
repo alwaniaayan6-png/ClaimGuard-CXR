@@ -385,6 +385,8 @@ def silver_green(
     from pathlib import Path as P
     import json
 
+    volume.reload()  # pre-flight fix: force volume snapshot refresh
+
     if _skip_if_exists(out_jsonl, "silver_green"):
         return {"status": "skipped"}
 
@@ -496,24 +498,64 @@ def silver_vert(
     volumes={"/data": volume},
 )
 def silver_ensemble(
-    green_jsonl: str = "/data/v6_silver/green_labels.jsonl",
-    radfact_jsonl: str = "/data/v6_silver/radfact_labels.jsonl",
-    vert_jsonl: str = "/data/v6_silver/vert_labels.jsonl",
+    green_paths: list[str] | None = None,
+    radfact_paths: list[str] | None = None,
+    vert_paths: list[str] | None = None,
     out_jsonl: str = "/data/v6_silver/ensemble.jsonl",
     out_stats: str = "/data/v6_silver/ensemble_stats.json",
 ) -> dict:
+    """Combine per-grader JSONLs into a single ensemble labels file.
+
+    Accepts a list of paths per grader so we can union CheXagent + gated
+    silver-label runs (each writes its own *_labels.jsonl and *_labels_gated.jsonl).
+    If lists are None, falls back to the single-path defaults for backward
+    compatibility.
+    """
     import sys
     sys.path.insert(0, "/root/verifact")
     from pathlib import Path as P
     import json
+    import tempfile
+
+    volume.reload()  # pre-flight fix: force volume snapshot refresh
 
     if _skip_if_exists(out_jsonl, "silver_ensemble"):
         return {"status": "skipped"}
 
+    green_paths = green_paths or ["/data/v6_silver/green_labels.jsonl"]
+    radfact_paths = radfact_paths or ["/data/v6_silver/radfact_labels.jsonl"]
+    vert_paths = vert_paths or ["/data/v6_silver/vert_labels.jsonl"]
+
+    def _concat(paths: list[str], tag: str) -> P:
+        """Concat N per-grader JSONLs into a single temp file for combine_labels."""
+        merged = P(f"/data/v6_silver/_merged_{tag}.jsonl")
+        merged.parent.mkdir(parents=True, exist_ok=True)
+        n = 0
+        with open(merged, "w") as out:
+            for p in paths:
+                pp = P(p)
+                if not pp.exists():
+                    print(f"[silver_ensemble] WARN: {p} missing, skipping")
+                    continue
+                with open(pp) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        out.write(line + "\n")
+                        n += 1
+        print(f"[silver_ensemble] merged {n} rows for {tag}")
+        return merged
+
+    g = _concat(green_paths, "green")
+    r = _concat(radfact_paths, "radfact")
+    v = _concat(vert_paths, "vert")
+
     from v5.eval.silver_ensemble import combine_labels
-    stats = combine_labels(P(green_jsonl), P(radfact_jsonl), P(vert_jsonl), P(out_jsonl))
+    stats = combine_labels(g, r, v, P(out_jsonl))
     P(out_stats).write_text(json.dumps(stats, indent=2, default=str))
-    payload = {"status": "ok", "stats": stats, "output": out_jsonl}
+    payload = {"status": "ok", "stats": stats, "output": out_jsonl,
+               "inputs": {"green": green_paths, "radfact": radfact_paths, "vert": vert_paths}}
     _write_status("silver_ensemble", payload)
     return payload
 
@@ -818,13 +860,26 @@ def assemble_v6_loo_splits(
     volumes={"/data": volume},
     secrets=secrets,
 )
-def train_v6_loo(held_out_site: str, image_root: str = "/data",
-                  ho_weights_path: str = "/data/groundbench_v5/ho_filter_weights.jsonl") -> dict:
-    """Train with one of {'openi','chestx_det10','padchest_gr'} held out."""
+def train_v6_loo(held_out_site: str, image_root: str = "/data") -> dict:
+    """Train with one of {'openi','chestx_det10','padchest-gr'} held out.
+
+    Per pre-flight review: HO-filter weights are NOT inherited from v5 or v6
+    3-site — the row_idx mapping is file-specific and transferring weights
+    across LOO training files silently applies random downweights to unrelated
+    rows. We follow the precedent set in run_v5_pipeline.py:970 and set
+    adversarial_ho_filter=False for LOO runs. The consistency loss remains
+    active and is the primary mitigation mechanism for IMG under LOO; HO
+    filter contribution is small-to-zero per Table 2 ablation.
+
+    Also explicitly calls ``volume.reload()`` at the top to avoid the
+    volume-commit race that failed the first LOO-chestx attempt.
+    """
     import sys
     sys.path.insert(0, "/root/verifact")
     from pathlib import Path as P
     import dataclasses
+
+    volume.reload()  # pre-flight fix: force volume snapshot refresh
 
     from v5.train import train_v5, V5TrainConfig
     from v5.model import V5Config
@@ -838,8 +893,7 @@ def train_v6_loo(held_out_site: str, image_root: str = "/data",
         out_dir=out_ckpt,
         image_root=P(image_root),
         use_wandb=False,
-        adversarial_ho_filter=True,
-        ho_filter_weights_path=P(ho_weights_path),
+        adversarial_ho_filter=False,
         epochs=2,
     )
     stats = train_v5(cfg, V5Config())
