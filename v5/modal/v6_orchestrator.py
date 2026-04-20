@@ -702,6 +702,106 @@ def train_v6_3site(
 
 @app.function(
     image=image,
+    cpu=2,
+    timeout=60 * 30,
+    volumes={"/data": volume},
+)
+def assemble_v6_loo_splits(
+    openi_jsonl: str = "/data/groundbench_v5/openi/groundbench_v5_openi.jsonl",
+    chestx_jsonl: str = "/data/groundbench_v5/chestx_det10/groundbench_v5_chestx_det10.jsonl",
+    padchest_gr_jsonl: str = "/data/groundbench_v5/padchest_gr_records.jsonl",
+    out_dir: str = "/data/groundbench_v5/all_v6_loo",
+) -> dict:
+    """Build held-one-site-out training + validation splits for 3-way LOO.
+
+    For each held-out site, concatenates the other two sites' rows and
+    deterministically splits 90/10 into train/val by MD5-hash on patient_id.
+    Writes six files:
+        {out_dir}/train_no_{site}.jsonl + val_no_{site}.jsonl
+    for site ∈ {openi, chestx_det10, padchest_gr}.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+    import hashlib
+
+    def _load(path: str, site_name: str) -> list[dict]:
+        rows: list[dict] = []
+        pp = P(path)
+        if not pp.exists():
+            print(f"[loo] WARNING: {path} missing — skipping {site_name}")
+            return rows
+        with open(pp) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                r.setdefault("site", site_name)
+                rows.append(r)
+        return rows
+
+    sites = {
+        "openi": _load(openi_jsonl, "openi"),
+        "chestx_det10": _load(chestx_jsonl, "chestx_det10"),
+        "padchest_gr": _load(padchest_gr_jsonl, "padchest_gr"),
+    }
+    present = [s for s, rows in sites.items() if rows]
+    if len(present) < 2:
+        return {"status": "failed", "reason": "fewer than 2 sites present",
+                "per_site_counts": {s: len(r) for s, r in sites.items()}}
+
+    def _patient_key(r: dict) -> str:
+        return str(r.get("patient_id") or r.get("study_id") or r.get("image_id") or "")
+
+    def _bucket(pid: str) -> int:
+        if not pid:
+            return 0
+        return int(hashlib.md5(pid.encode()).hexdigest(), 16) % 100
+
+    out = P(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    per_site_counts: dict[str, dict] = {}
+    for held_out in present:
+        included = [s for s in present if s != held_out]
+        merged: list[dict] = []
+        for s in included:
+            merged.extend(sites[s])
+        train_rows: list[dict] = []
+        val_rows: list[dict] = []
+        for r in merged:
+            pid = _patient_key(r)
+            if not pid:
+                continue
+            if _bucket(pid) < 90:
+                train_rows.append(r)
+            else:
+                val_rows.append(r)
+        train_path = out / f"train_no_{held_out}.jsonl"
+        val_path = out / f"val_no_{held_out}.jsonl"
+        with open(train_path, "w") as f:
+            for r in train_rows:
+                f.write(json.dumps(r) + "\n")
+        with open(val_path, "w") as f:
+            for r in val_rows:
+                f.write(json.dumps(r) + "\n")
+        per_site_counts[held_out] = {
+            "included": included,
+            "n_train": len(train_rows),
+            "n_val": len(val_rows),
+        }
+        print(f"[loo] held_out={held_out} · train={len(train_rows)} · val={len(val_rows)}")
+
+    payload = {"status": "ok", "per_site_counts": per_site_counts,
+               "sites_present": present, "out_dir": str(out)}
+    _write_status("assemble_v6_loo_splits", payload)
+    return payload
+
+
+@app.function(
+    image=image,
     gpu=_H100,
     timeout=60 * 60 * 4,
     volumes={"/data": volume},
