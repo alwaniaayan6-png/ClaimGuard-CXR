@@ -107,6 +107,13 @@ image = (
         "anthropic==0.42.0",
         "scikit-image==0.24.0",
         "huggingface_hub>=0.30.0,<1.0",
+        # GREEN-RadLlama2-7b's trust_remote_code modeling file imports
+        # matplotlib + einops + timm at module-load time. Include here
+        # so silver_green doesn't crash on import. (Same class of failure
+        # as CheXagent; different container, same root cause.)
+        "matplotlib==3.9.2",
+        "einops==0.8.0",
+        "timm==1.0.9",
     )
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
 )
