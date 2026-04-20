@@ -73,11 +73,14 @@ image_chexagent = (
         "accelerate==0.30.1",
         "numpy==1.26.4",
         "pandas==2.2.2",
+        "pyarrow==17.0.0",
         "pillow==10.4.0",
         "scipy==1.14.1",
         "pyyaml==6.0.2",
         "anthropic==0.42.0",
         "huggingface_hub==0.23.5",
+        "scikit-learn==1.5.1",
+        "scikit-image==0.24.0",
         *_chexagent_deps,
     )
     .add_local_dir(str(VERIFACT_ROOT), remote_path="/root/verifact", copy=True)
