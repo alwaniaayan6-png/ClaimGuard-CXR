@@ -371,7 +371,7 @@ def decompose_rrg_claims(
 @app.function(
     image=image,
     gpu=_H100,
-    timeout=60 * 60 * 2,
+    timeout=60 * 60 * 4,
     volumes={"/data": volume},
     secrets=secrets,
 )
@@ -901,6 +901,159 @@ def train_v6_loo(held_out_site: str, image_root: str = "/data") -> dict:
     _write_status(f"train_v6_loo_{held_out_site}", {"status": "ok", "summary": summary,
                                                         "held_out_site": held_out_site})
     return {"summary": summary, "held_out_site": held_out_site}
+
+
+# ---------------------------------------------------------------------------
+# Day 6b: generic diagnostic eval (used to compute v6.0-3site test numbers)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu=_H100,
+    timeout=60 * 60 * 1,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def diag_eval(
+    ckpt_path: str,
+    test_jsonl: str,
+    out_json: str,
+    image_root: str = "/data",
+    tag: str = "diag",
+) -> dict:
+    """Run evidence-blindness diagnostic on an arbitrary checkpoint + test split.
+
+    Thin wrapper over ``evidence_blindness.run_diagnostic``; used to re-score
+    v6.0-3site on its test split (the training job did not persist a diag
+    JSON), and to score arbitrary re-runs.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+
+    volume.reload()
+    from v5.eval.evidence_blindness import run_diagnostic, diagnostic_to_json
+
+    ckpt = P(ckpt_path)
+    if not ckpt.exists():
+        return {"error": f"missing checkpoint {ckpt}"}
+
+    diag = run_diagnostic(
+        model_ckpt=ckpt,
+        val_jsonl=P(test_jsonl),
+        image_root=P(image_root),
+        batch_size=32,
+        n_shuffle_seeds=3,
+    )
+    out_p = P(out_json)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    diagnostic_to_json(diag, out_p)
+    result = {
+        "tag": tag,
+        "ckpt": str(ckpt),
+        "test_jsonl": str(test_jsonl),
+        "n_test": diag.n_test,
+        "acc_full": diag.acc_full,
+        "acc_image_zeroed": diag.acc_image_zeroed,
+        "acc_evidence_shuffled": diag.acc_evidence_shuffled,
+        "img_gap_pp": diag.img_gap_pp,
+        "esg_gap_pp": diag.esg_gap_pp,
+        "ipg_gap_pp": diag.ipg_gap_pp,
+        "evidence_blind": diag.evidence_blind,
+    }
+    _write_status(f"diag_eval_{tag}", {"status": "ok", "result": result})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Day 7b: LOO held-out-site IMG evaluation
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu=_H100,
+    timeout=60 * 60 * 1,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def loo_img_eval(
+    held_out_site: str,
+    test_jsonl: str = "/data/groundbench_v5/all_v6/groundbench_v6_test.jsonl",
+    image_root: str = "/data",
+    out_dir: str = "/data/v6_results/loo",
+) -> dict:
+    """Evaluate a trained LOO checkpoint on its held-out site's test subset.
+
+    Canonical site names: "openi", "chestx_det10", "padchest-gr" (hyphen).
+    The function normalizes ``padchest_gr`` → ``padchest-gr`` defensively
+    (Mistake 5 from HANDOFF_V6_2026-04-20).
+
+    Filters the combined v6 test split by ``source_site == held_out_site`` to
+    measure zero-shot generalization: how well does a verifier trained on two
+    sites transfer to a third unseen site? Reports IMG / ESG / IPG on the
+    unseen site's claims.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+
+    # Canonical slug normalization — padchest-gr is the source of truth
+    if held_out_site == "padchest_gr":
+        held_out_site = "padchest-gr"
+
+    volume.reload()
+
+    from v5.eval.evidence_blindness import run_diagnostic, diagnostic_to_json
+
+    ckpt = P(f"/data/checkpoints/claimguard_v6/v6_0_loo_no_{held_out_site}/best.pt")
+    if not ckpt.exists():
+        return {"error": f"missing checkpoint {ckpt}"}
+
+    # Filter combined test split to only held-out site rows.
+    # PadChest-GR rows have site= but source_site=None (assembly quirk).
+    # OpenI / ChestX-Det10 rows populate both. Fall back to site for safety.
+    rows_held_out: list[dict] = []
+    with open(test_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            row_site = r.get("source_site") or r.get("site")
+            if str(row_site) == held_out_site:
+                rows_held_out.append(r)
+
+    if not rows_held_out:
+        return {"error": f"no test rows with source_site={held_out_site}"}
+
+    # Write to stable tmp path so diagnostic can re-read
+    out_dir_p = P(out_dir)
+    out_dir_p.mkdir(parents=True, exist_ok=True)
+    tmp_jsonl = out_dir_p / f"_test_{held_out_site}.jsonl"
+    with open(tmp_jsonl, "w") as f:
+        for r in rows_held_out:
+            f.write(json.dumps(r) + "\n")
+
+    diag = run_diagnostic(
+        model_ckpt=ckpt,
+        val_jsonl=tmp_jsonl,
+        image_root=P(image_root),
+        batch_size=32,
+        n_shuffle_seeds=3,
+    )
+    diagnostic_to_json(diag, out_dir_p / f"diag_loo_no_{held_out_site}.json")
+    result = {
+        "held_out_site": held_out_site,
+        "n_test": diag.n_test,
+        "acc_full": diag.acc_full,
+        "img_gap_pp": diag.img_gap_pp,
+        "esg_gap_pp": diag.esg_gap_pp,
+        "ipg_gap_pp": diag.ipg_gap_pp,
+        "evidence_blind": diag.evidence_blind,
+    }
+    _write_status(f"loo_img_eval_{held_out_site}", {"status": "ok", "result": result})
+    return result
 
 
 # ---------------------------------------------------------------------------

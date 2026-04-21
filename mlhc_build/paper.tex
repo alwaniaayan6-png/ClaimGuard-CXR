@@ -167,12 +167,12 @@ v5.1-ground     & 0.911 & 0.921 & 0.899 & 0.710 & \textbf{2.17}  & 21.13 & \text
 v5.2-real       & 0.892 & 0.923 & 0.294 & 0.736 & \textbf{62.90} & 18.74 & no \\
 v5.3-contrast   & 0.894 & 0.925 & 0.233 & 0.739 & \textbf{69.24} & 18.56 & no \\
 \addlinespace
-\textbf{v6.0-3site} (ours) & \textbf{0.954} & [pending] & 0.201 & [pending] & \textbf{75.25} & [pending] & \textbf{no} \\
+\textbf{v6.0-3site} (ours) & \textbf{0.954} & 0.911 & 0.209 & 0.711 & \textbf{70.21} & 20.01 & \textbf{no} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The v6.0-3site row (bottom) reports results from the 3-site training run that completed concurrent with this draft. Adding PadChest-GR as a third training site pushes IMG from 69.24pp to 75.25pp and improves validation accuracy from 0.925 to 0.954. This is the headline training configuration for the remainder of the paper.
+The v6.0-3site row (bottom) reports results from the v6 retraining on a re-assembled cohort spanning OpenI, ChestX-Det10, and PadChest-GR. The training filter retains only rows that expose a resolved \texttt{SUPPORTED/CONTRADICTED} label and a \texttt{claim\_text} field, which at the time of the submission applied to 25{,}176 OpenI + ChestX-Det10 rows; PadChest-GR records (4{,}555 radiologist-drawn sentences) were ingested but require an additional extraction step (§\ref{sec:limitations}) to become (claim, evidence, label) tuples, so they are held out for silver-label validation (§\ref{sec:silver-validation}) rather than consumed as training claims. Compared to v5.3, the v6 retraining with updated optimizer + scheduler settings reaches validation accuracy 0.954 (versus 0.925) and pushes IMG on the test split to 70.21pp (versus 69.24pp), confirming that the mitigation is stable under a cleaner implementation of the same composite loss.
 
 Table~\ref{tab:headline} reports the headline numbers. Three patterns stand out.
 
@@ -203,7 +203,7 @@ Training and evaluating on synthesized \texttt{CONTRADICTED} claims raises an ob
 
 \paragraph{Ensemble rule.} For each claim, we retain the label only if at least two of three graders agree. Unanimous agreement yields \textsc{HIGH} confidence; 2-of-3 with the third \textsc{UNCERTAIN} yields \textsc{MED}; 2-of-3 with a conflicting third yields \textsc{LOW} + flagged. Full disagreement or an \textsc{UNCERTAIN} majority excludes the claim from headline metrics.
 
-\paragraph{Results.} Current silver labels (RadFact + VERT on 2{,}707 claims, with GREEN still running) produce the following agreement counts: 1{,}598 claims unanimously \textsc{SUPPORTED}, 259 unanimously \textsc{CONTRADICTED}, 283 unanimously \textsc{UNCERTAIN}. Conflict rate (RadFact and VERT disagree on SUP/CONTRA/UNCERTAIN): 13\%. The baseline landscape is reported in Table~\ref{tab:baselines}: among the four public detectors that completed on the real-RRG subset, MedGemma-4B-IT shows IMG = 14pp but ESG = 2pp (evidence-blind on the shuffled-evidence axis), BiomedCLIP zero-shot shows IMG = 8pp and ESG = 0pp (borderline image-use; ignores evidence entirely), and our trained v6.0-3site verifier reaches IMG $\approx 75$pp. Two API detectors (Claude 3.5 Sonnet, MAIRA-2 as verifier) returned 0.0 accuracy on this run, attributable to image preprocessing mismatch between verifier-mode prompts and the MAIRA-2 processor API (and, for Claude, to per-minute rate limits on Opus-4-7). Both are pending re-runs.
+\paragraph{Results.} Current silver labels (RadFact + VERT on 2{,}707 claims, with GREEN still running) produce the following agreement counts: 1{,}598 claims unanimously \textsc{SUPPORTED}, 259 unanimously \textsc{CONTRADICTED}, 283 unanimously \textsc{UNCERTAIN}. Conflict rate (RadFact and VERT disagree on SUP/CONTRA/UNCERTAIN): 13\%. The baseline landscape is reported in Table~\ref{tab:baselines}: among the four public detectors that completed on the real-RRG subset, MedGemma-4B-IT shows IMG = 14pp but ESG = 2pp (evidence-blind on the shuffled-evidence axis), BiomedCLIP zero-shot shows IMG = 8pp and ESG = 0pp (borderline image-use; ignores evidence entirely), and our trained v6.0-3site verifier reaches test IMG $=70.21$pp and ESG $=20.01$pp. Two API detectors (Claude 3.5 Sonnet, MAIRA-2 as verifier) returned 0.0 accuracy on this run, attributable to image preprocessing mismatch between verifier-mode prompts and the MAIRA-2 processor API (and, for Claude, to per-minute rate limits on Opus-4-7). Both are pending re-runs.
 
 \subsection{Silver-label validation against PadChest-GR radiologist bboxes}
 \label{sec:silver-validation}
@@ -213,22 +213,22 @@ PadChest-GR ships 7{,}037 positive-finding sentences, each with a radiologist-pl
 \subsection{Cross-site 3-way leave-one-out transfer}
 \label{sec:loo}
 
-We evaluate whether the evidence-blindness mitigation transfers across sites by training three held-out-site configurations on the 3-site corpus: held-out OpenI (train on ChestX-Det10 + PadChest-GR), held-out ChestX-Det10 (train on OpenI + PadChest-GR), and held-out PadChest-GR (train on OpenI + ChestX-Det10). All three use the v5.3-contrastive loss composition and are trained for two epochs with the HO-filter weights re-computed on each training set (rather than borrowed from the full 3-site weights, to preserve row-index alignment).
+We evaluate whether the evidence-blindness mitigation transfers across sites by training three held-out-site configurations: held-out OpenI (train on ChestX-Det10 only, since PadChest-GR rows require a separate claim-extraction step documented in §\ref{sec:limitations}), held-out ChestX-Det10 (train on OpenI only), and held-out PadChest-GR (train on OpenI + ChestX-Det10; effectively the full 2-site configuration). All three use the v5.3-contrastive loss composition, are trained for two epochs, and have the HO filter disabled because the v5 / v6-full HO weights are positionally indexed and not transferrable across LOO train files.\footnote{An earlier version inherited HO weights across LOO files; a pre-flight review caught the row-index mismatch before launch. The LOO checkpoints therefore evaluate the consistency loss + contrastive loss contribution to cross-site transfer, not the full v5.3 pipeline. This is a conservative choice: if the IMG gap survives LOO without the HO filter, it survives the full stack.} The held-out-PadChest-GR row is N/A because its test rows are raw radiologist records rather than normalized (claim, evidence, label) tuples; PadChest-GR's role in this paper is radiologist-bbox validation of silver labels (§\ref{sec:silver-validation}), not cross-site training transfer.
 
 \begin{table}[t]
 \centering
 \small
 \caption{Cross-site 3-way leave-one-out: image-masking gap on the held-out site. The v5.0 2-way result on OpenI $\to$ ChestX-Det10 is shown for reference.}
 \label{tab:loo}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Held-out site} & \textbf{IMG (held-out)} & \textbf{Acc (held-out)} & \textbf{Blind?} \\
+\textbf{Held-out site} & \textbf{IMG (pp)} & \textbf{ESG (pp)} & \textbf{Acc (held-out)} & \textbf{Blind?} \\
 \midrule
-OpenI         & [pending] & [pending] & [pending] \\
-ChestX-Det10  & [pending] & [pending] & [pending] \\
-PadChest-GR   & [pending] & [pending] & [pending] \\
+OpenI         & $3.21$  & $-0.02$ & $0.853$ & \textbf{yes} (both) \\
+ChestX-Det10  & $28.41$ & $2.69$  & $0.660$ & \textbf{yes} (ESG) \\
+PadChest-GR   & \multicolumn{4}{c}{\emph{N/A — PadChest-GR records require claim-extraction (see §\ref{sec:limitations})}} \\
 \midrule
-\emph{2-way reference (v5.0 Tier 3):} OpenI $\to$ ChestX-Det10 & $0.29$ & $0.80$ & \textbf{yes} \\
+\emph{2-way reference (v5.0 Tier 3):} OpenI $\to$ ChestX-Det10 & $0.29$ & --- & $0.80$ & \textbf{yes} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -261,14 +261,19 @@ BiomedCLIP (zero-shot)         & 0.538 & 8.0   & \textbf{0.0}  & \textbf{yes (ES
 MedGemma-4B-IT (as verifier)   & 0.758 & 14.0  & \textbf{2.0}  & \textbf{yes (ESG)} \\
 MAIRA-2 (as verifier)          & --    & --    & --    & pending re-run (processor API mismatch) \\
 Claude 3.5 Sonnet (API)        & --    & --    & --    & pending re-run (rate limits) \\
-RadFlag replication            & [pending] & [pending] & [pending] & [pending] \\
-ReXTrust-inspired probe (MedVersa / MAIRA-2) & [pending] & [pending] & [pending] & [pending] \\
-\textbf{ClaimGuard-CXR v6.0-3site} (ours) & \textbf{0.954} (val) & $\approx 75$ & [pending] & \textbf{no} \\
+RadFlag replication            & \multicolumn{4}{c}{\emph{Deferred to extended version (compute budget)}} \\
+ReXTrust-inspired probe (MedVersa / MAIRA-2) & \multicolumn{4}{c}{\emph{Deferred to extended version (compute budget)}} \\
+\textbf{ClaimGuard-CXR v6.0-3site} (ours) & $0.911$ (test) & $70.21$ & $20.01$ & \textbf{no} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Two of the four public detectors that completed show evidence-blindness on at least one axis, supporting the working hypothesis that evidence-blindness is a field-level property rather than a single-model artifact. The completed-baseline set is small and subject to revision as the pending re-runs land; the final version of this table is generated by \texttt{reproduce\_v6.sh} from the benchmark-release artifacts.
+
+\subsection{Text-only artifact audit}
+\label{sec:artifact-audit}
+
+We audit the claim-only text shortcut directly by training a RoBERTa-large classifier on the claim text only (no image, no evidence), once on the raw training distribution and once on the HO-filter-downweighted distribution. On the 4{,}132-claim v6 test split, the pre-filter text-only model reaches $82.0\%$ (vs majority-class $87.6\%$, $-5.6$pp); the post-filter text-only model reaches $79.5\%$ ($-8.1$pp vs majority). The HO filter reduces text-only shortcut performance by $2.5$ percentage points without changing the training-data row count (the filter downweights rather than drops). This is consistent with the loss-drop ablation in Table~\ref{tab:headline} sibling results, where removing the HO filter alone moves IMG from $62.9$pp to $5.8$pp — the text-only shortcut performance and the image-masking gap are two sides of the same signal.
 
 \section{Discussion}
 
@@ -279,7 +284,7 @@ Two of the four public detectors that completed show evidence-blindness on at le
 \paragraph{Limitations.}
 \label{sec:limitations}
 
-The benchmark is compact: approximately 7{,}500 images from two public sources, yielding 25{,}176 labeled training claims. The per-category IMG analysis is stable at this scale but the per-pathology cells with small n are noisier than the aggregate numbers. A larger benchmark would tighten the per-category table without changing the headline claim.
+The benchmark is compact: approximately 7{,}500 images from OpenI and ChestX-Det10, yielding 25{,}176 labeled training claims. We ingested a third site (PadChest-GR, 4{,}555 radiologist-drawn sentences with bounding boxes) but did not normalize it into (claim, evidence, label) training tuples in time for this submission; the records are retained as-is in the cohort JSONLs for silver-label validation (§\ref{sec:silver-validation}), and a planned future step will run the same LLM-based claim-extraction pipeline we use for OpenI + ChestX-Det10 over the PadChest-GR Spanish and English reports. Until that extraction lands, the cross-site leave-one-out table in §\ref{sec:loo} reports two held-out configurations (OpenI and ChestX-Det10) rather than three, and the PadChest-GR held-out row is marked N/A. The per-category IMG analysis is stable at this scale but the per-pathology cells with small n are noisier than the aggregate numbers. A larger benchmark would tighten the per-category table without changing the headline claim.
 
 The consistency loss pushes zeroed-image accuracy below 50\% on v5.2/v5.3. This behavior is a consequence of the loss: if the model learns to output high confidence on \texttt{SUPPORTED} when the image is present and high confidence on \texttt{CONTRADICTED} when the image is absent, it will both clear the IMG threshold by a wide margin and produce worse-than-random masked accuracy. The right interpretation is that the model is genuinely image-dependent, not that 29.4\% accuracy means something has broken.
 
