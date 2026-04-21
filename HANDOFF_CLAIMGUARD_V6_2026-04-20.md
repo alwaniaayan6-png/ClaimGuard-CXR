@@ -417,4 +417,28 @@ Today's pre-flight saved an estimated $30-50 of unpublishable GPU time on the LO
 | 2026-04-19 | v6.0 initial | Aayan Alwani | 17-day NeurIPS E&D sprint plan + architecture spec |
 | 2026-04-19 | v6.0 pre-flight-patched | Aayan Alwani | Folded Opus pre-flight reviewer fixes into plan |
 | 2026-04-19 | v6.0 post-verification | Aayan Alwani | External verifications (ReXTrust, HEAL-MedVQA, MedVersa, PadChest-GR) |
-| 2026-04-20 | v6.0 compute-90% | Aayan Alwani | **This handoff.** Day 6-8 complete; silver labeling mostly complete; 5 bug classes caught & fixed; paper + datasheet + poster script drafted |
+| 2026-04-20 | v6.0 compute-90% | Aayan Alwani | Main handoff. Day 6-8 complete; silver labeling mostly complete; 5 bug classes caught & fixed; paper + datasheet + poster script drafted |
+| 2026-04-20 late | v6.0 verified | Aayan Alwani | Cross-session verification from a concurrent Modal client. Row-counts confirmed match handoff claims: green_labels.jsonl=368, green_labels_gated.jsonl=1,142 (partial, needs backfill), radfact/vert_labels_gated=2,339 each, claims_gated=2,339. GREEN-CheXagent + GREEN-gated jobs terminal `ValueError` (Modal 2h timeout), consistent with "needs backfill" note. No new Modal work spawned this verification pass; existing handoff is fit for a fresh chat to pick up from |
+
+---
+
+## Fresh-session resume instructions (appended 2026-04-20 late)
+
+Drop a new chat into this state by executing, in order:
+
+1. Read `~/.claude/CLAUDE.md` (global rules: model selection, pre-flight rule, doc-sync, git rules).
+2. Read `~/Vault/CLAUDE.md`, `~/Vault/index.md`, last 5 entries of `~/Vault/log.md`, `~/Vault/wiki/projects/VeriFact.md`, and `~/Vault/wiki/synthesis/claimguard-v6-neurips-sprint-2026-04-19.md`.
+3. Read this handoff fully (top to bottom).
+4. Read `PLAN_V6_17DAY_NEURIPS.md` and `ARCHITECTURE_V6_0_NEURIPS_MAIN.md` fully.
+5. Skim `mlhc_build/paper.tex` (look for placeholder markers before Tier 2 numbers land).
+6. Check Modal state is still current:
+   ```bash
+   modal app list | grep claimguard-v6
+   modal volume ls claimguard-v5-data /v6_silver/
+   modal volume ls claimguard-v5-data /v6_rrg/
+   modal volume ls claimguard-v5-data /checkpoints/claimguard_v6/
+   ```
+   Expected: orchestrator deployed; 9 files under `/v6_silver/`; 2 under `/v6_rrg/`; 4 checkpoints under `/checkpoints/claimguard_v6/`.
+7. Begin with **Tier 1 Task 1** (GREEN gated backfill) per the Pending Tasks section above.
+
+Only after steps 1–6 should the new session spawn any Modal job. Standing pre-flight rule applies per `Pre-flight review cadence going forward` above.
