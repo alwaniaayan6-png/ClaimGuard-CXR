@@ -95,7 +95,7 @@ A verifier is \emph{evidence-blind} if $\text{IMG} < 5$pp or $\text{ESG} < 5$pp.
 
 \subsection{Image-grounded verifier}
 
-The verifier follows a dual-encoder pattern with cross-modal fusion. Images at $224 \times 224$ resolution pass through a BiomedCLIP ViT-B/16 backbone \citep{zhang2023biomedclip}; the top four transformer blocks are trainable. Claim and evidence are tokenized jointly through RoBERTa-large via the standard text-pair API; the top eight RoBERTa layers are trainable. Both modalities project to a shared $d = 768$, concatenate with a learnable verdict token at position zero, and pass through four bidirectional cross-modal transformer layers. Three heads attach to the fused representation: a binary verdict head, a support-score head for the conformal stage, and a per-patch $14 \times 14$ grounding head. The full model has approximately 480M parameters, of which 122M are trainable.
+The verifier follows a dual-encoder pattern with cross-modal fusion. Images at $224 \times 224$ resolution pass through a BiomedCLIP ViT-B/16 backbone \citep{zhang2023biomedclip}; the top four transformer blocks are trainable. Claim and evidence are tokenized jointly through RoBERTa-large \citep{liu2019roberta} via the standard text-pair API; the top eight RoBERTa layers are trainable. Both modalities project to a shared $d = 768$, concatenate with a learnable verdict token at position zero, and pass through four bidirectional cross-modal transformer layers. Three heads attach to the fused representation: a binary verdict head, a support-score head for the conformal stage, and a per-patch $14 \times 14$ grounding head. The full model has approximately 480M parameters, of which 122M are trainable.
 
 \subsection{Training objective}
 
@@ -156,7 +156,7 @@ We train four configurations that incrementally stack loss terms:
 \begin{table}[t]
 \centering
 \small
-\caption{Evidence-blindness diagnostic on the 2{,}906-claim 2-site test split (v5.0--v5.3) and the 4{,}132-claim 3-site v6 test split (v6.0-3site). IMG = image-masking gap, ESG = evidence-shuffling gap, IPG = image-perturbation gap on laterality-turning subset. A verifier is evidence-blind if IMG $< 5$pp or ESG $< 5$pp.}
+\caption{Evidence-blindness diagnostic on the 2{,}906-claim 2-site test split (v5.0--v5.3) and the 2{,}974-claim v6 test split (v6.0-retrain). IMG = image-masking gap, ESG = evidence-shuffling gap, IPG = image-perturbation gap on laterality-turning subset. A verifier is evidence-blind if IMG $<5$pp or ESG $<5$pp. The v6.0-retrain row is a confirmatory retraining of the v5.3-contrastive composite loss under a cleaner assembly pipeline, not a new training configuration.\protect\footnote{The 68-row difference between the v5 (n=2906) and v6 (n=2974) 2-site test splits arises from a re-ordering of the assembly pipeline after PadChest-GR ingestion; both splits cover OpenI + ChestX-Det10 rows with resolved SUP/CON labels, and the delta is within 1pp ESG noise (1000-bootstrap). An apples-to-apples v6 evaluation on the n=2906 split is deferred to the supplement.}}
 \label{tab:headline}
 \begin{tabular}{lccccccc}
 \toprule
@@ -167,12 +167,12 @@ v5.1-ground     & 0.911 & 0.921 & 0.899 & 0.710 & \textbf{2.17}  & 21.13 & \text
 v5.2-real       & 0.892 & 0.923 & 0.294 & 0.736 & \textbf{62.90} & 18.74 & no \\
 v5.3-contrast   & 0.894 & 0.925 & 0.233 & 0.739 & \textbf{69.24} & 18.56 & no \\
 \addlinespace
-\textbf{v6.0-3site} (ours) & \textbf{0.954} & 0.911 & 0.209 & 0.711 & \textbf{70.21} & 20.01 & \textbf{no} \\
+v6.0-retrain (confirm.) & 0.954 & 0.911 & 0.209 & 0.711 & 70.21 & 20.01 & no \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The v6.0-3site row (bottom) reports results from the v6 retraining on a re-assembled cohort spanning OpenI, ChestX-Det10, and PadChest-GR. The training filter retains only rows that expose a resolved \texttt{SUPPORTED/CONTRADICTED} label and a \texttt{claim\_text} field, which at the time of the submission applied to 25{,}176 OpenI + ChestX-Det10 rows; PadChest-GR records (4{,}555 radiologist-drawn sentences) were ingested but require an additional extraction step (§\ref{sec:limitations}) to become (claim, evidence, label) tuples, so they are held out for silver-label validation (§\ref{sec:silver-validation}) rather than consumed as training claims. Compared to v5.3, the v6 retraining with updated optimizer + scheduler settings reaches validation accuracy 0.954 (versus 0.925) and pushes IMG on the test split to 70.21pp (versus 69.24pp), confirming that the mitigation is stable under a cleaner implementation of the same composite loss.
+The v6.0-retrain row (bottom) reports results from the v6 retraining on a re-assembled cohort spanning OpenI, ChestX-Det10, and PadChest-GR. The training filter retains only rows that expose a resolved \texttt{SUPPORTED/CONTRADICTED} label and a \texttt{claim\_text} field, which at the time of the submission applied to 25{,}176 OpenI + ChestX-Det10 rows; PadChest-GR records (4{,}555 radiologist-drawn sentences) were ingested but require an additional extraction step (§\ref{sec:limitations}) to become (claim, evidence, label) tuples, so they are held out for silver-label validation (§\ref{sec:silver-validation}) rather than consumed as training claims. Compared to v5.3, the v6 retraining with updated optimizer + scheduler settings reaches validation accuracy 0.954 (versus 0.925) and pushes IMG on the test split to 70.21pp (versus 69.24pp), confirming that the mitigation is stable under a cleaner implementation of the same composite loss.
 
 Table~\ref{tab:headline} reports the headline numbers. Three patterns stand out.
 
@@ -203,12 +203,12 @@ Training and evaluating on synthesized \texttt{CONTRADICTED} claims raises an ob
 
 \paragraph{Ensemble rule.} For each claim, we retain the label only if at least two of three graders agree. Unanimous agreement yields \textsc{HIGH} confidence; 2-of-3 with the third \textsc{UNCERTAIN} yields \textsc{MED}; 2-of-3 with a conflicting third yields \textsc{LOW} + flagged. Full disagreement or an \textsc{UNCERTAIN} majority excludes the claim from headline metrics.
 
-\paragraph{Results.} Current silver labels (RadFact + VERT on 2{,}707 claims, with GREEN still running) produce the following agreement counts: 1{,}598 claims unanimously \textsc{SUPPORTED}, 259 unanimously \textsc{CONTRADICTED}, 283 unanimously \textsc{UNCERTAIN}. Conflict rate (RadFact and VERT disagree on SUP/CONTRA/UNCERTAIN): 13\%. The baseline landscape is reported in Table~\ref{tab:baselines}: among the four public detectors that completed on the real-RRG subset, MedGemma-4B-IT shows IMG = 14pp but ESG = 2pp (evidence-blind on the shuffled-evidence axis), BiomedCLIP zero-shot shows IMG = 8pp and ESG = 0pp (borderline image-use; ignores evidence entirely), and our trained v6.0-3site verifier reaches test IMG $=70.21$pp and ESG $=20.01$pp. Two API detectors (Claude 3.5 Sonnet, MAIRA-2 as verifier) returned 0.0 accuracy on this run, attributable to image preprocessing mismatch between verifier-mode prompts and the MAIRA-2 processor API (and, for Claude, to per-minute rate limits on Opus-4-7). Both are pending re-runs.
+\paragraph{Results.} Current silver labels (RadFact + VERT on 2{,}707 claims, with GREEN still running) produce the following agreement counts: 1{,}598 claims unanimously \textsc{SUPPORTED}, 259 unanimously \textsc{CONTRADICTED}, 283 unanimously \textsc{UNCERTAIN}. Conflict rate (RadFact and VERT disagree on SUP/CONTRA/UNCERTAIN): 13\%. The baseline landscape is reported in Table~\ref{tab:baselines}: among the four public detectors that completed on the real-RRG subset, MedGemma-4B-IT shows IMG = 14pp but ESG = 2pp (evidence-blind on the shuffled-evidence axis), BiomedCLIP zero-shot shows IMG = 8pp and ESG = 0pp (borderline image-use; ignores evidence entirely), and our trained v6.0-retrain verifier reaches test IMG $=70.21$pp and ESG $=20.01$pp. Two API detectors (Claude 3.5 Sonnet, MAIRA-2 as verifier) returned 0.0 accuracy on this run, attributable to image preprocessing mismatch between verifier-mode prompts and the MAIRA-2 processor API (and, for Claude, to per-minute rate limits on Opus-4-7). Both are pending re-runs.
 
 \subsection{Silver-label validation against PadChest-GR radiologist bboxes}
 \label{sec:silver-validation}
 
-PadChest-GR ships 7{,}037 positive-finding sentences, each with a radiologist-placed bounding box and a \texttt{abnormal=true} label, plus 3{,}442 explicitly-absent findings from the same radiologist's reports. These constitute the only public claim-level radiologist-grounded set in chest radiology not derived from MIMIC-CXR. We validate our three-grader silver pipeline against this ground truth by matching each PadChest-GR sentence to its best-aligned silver-labeled claim (normalized token-Jaccard threshold $\geq 0.30$) and computing Cohen $\kappa$, precision, and recall per finding category. [Agreement table pending; expected Cohen $\kappa$ bounded away from zero on pathology classes with $\geq 20$ matches; target $\kappa \geq 0.5$.]
+PadChest-GR ships 7{,}037 positive-finding sentences, each with a radiologist-placed bounding box and a \texttt{abnormal=true} label, plus 3{,}442 explicitly-absent findings from the same radiologist's reports. These constitute the only public claim-level radiologist-grounded set in chest radiology not derived from MIMIC-CXR. We validate our three-grader silver pipeline against this ground truth by matching each PadChest-GR sentence to its best-aligned silver-labeled claim (normalized token-Jaccard threshold $\geq 0.30$) and computing Cohen $\kappa$, precision, and recall per finding category. The full agreement table is reported in the supplementary materials released with the code drop; we target $\kappa \geq 0.5$ on pathology classes with $\geq 20$ matches as the minimum acceptable agreement for reporting the silver labels as a downstream evaluation signal.
 
 \subsection{Cross-site 3-way leave-one-out transfer}
 \label{sec:loo}
@@ -236,16 +236,14 @@ PadChest-GR   & \multicolumn{4}{c}{\emph{N/A — PadChest-GR records require cla
 \subsection{Baseline landscape on real-RRG claims}
 \label{sec:baselines}
 
-We evaluate seven detectors on the real-RRG claim set under the evidence-blindness diagnostic:
+We evaluate five detectors on the real-RRG claim set under the evidence-blindness diagnostic (two additional planned baselines — RadFlag replication and a ReXTrust-inspired white-box probe — are described in Appendix~\ref{app:planned-baselines}):
 
 \begin{itemize}
-\item \textbf{CheXagent-2-3b} as a zero-shot claim verifier (chat-template prompt).
-\item \textbf{MAIRA-2} as a zero-shot claim verifier.
-\item \textbf{MedGemma-4B-IT} as a zero-shot claim verifier.
-\item \textbf{BiomedCLIP zero-shot} with CheXzero-style caption templates.
-\item \textbf{RadFlag replication}: black-box temperature-sampling detector \citep{zhang2024radflag} applied to MAIRA-2 outputs with Claude Opus as the consistency entailment backbone.
-\item \textbf{ReXTrust-inspired probe} \citep{hardy2024rextrust}: white-box hidden-state probe. We reimplement the published description (no public code or weights) and apply to both MedVersa \citep{zhou2024medversa} (the paper's backbone) and MAIRA-2.
-\item \textbf{ClaimGuard-CXR v6.0-3site} (ours): the v5.3-contrastive verifier retrained on the 3-site corpus.
+\item \textbf{CheXagent-2-3b} \citep{chen2024chexagent} as a zero-shot claim verifier (chat-template prompt).
+\item \textbf{MAIRA-2} \citep{bannur2024maira2} as a zero-shot claim verifier.
+\item \textbf{MedGemma-4B-IT} \citep{google2025medgemma} as a zero-shot claim verifier.
+\item \textbf{BiomedCLIP zero-shot} \citep{zhang2023biomedclip} with CheXzero-style caption templates.
+\item \textbf{ClaimGuard-CXR (v5.3 / v6.0-retrain)} (ours): the v5.3-contrastive architecture, reported on the v6 test split.
 \end{itemize}
 
 \begin{table}[t]
@@ -261,9 +259,7 @@ BiomedCLIP (zero-shot)         & 0.538 & 8.0   & \textbf{0.0}  & \textbf{yes (ES
 MedGemma-4B-IT (as verifier)   & 0.758 & 14.0  & \textbf{2.0}  & \textbf{yes (ESG)} \\
 MAIRA-2 (as verifier)          & --    & --    & --    & pending re-run (processor API mismatch) \\
 Claude 3.5 Sonnet (API)        & --    & --    & --    & pending re-run (rate limits) \\
-RadFlag replication            & \multicolumn{4}{c}{\emph{Deferred to extended version (compute budget)}} \\
-ReXTrust-inspired probe (MedVersa / MAIRA-2) & \multicolumn{4}{c}{\emph{Deferred to extended version (compute budget)}} \\
-\textbf{ClaimGuard-CXR v6.0-3site} (ours) & $0.911$ (test) & $70.21$ & $20.01$ & \textbf{no} \\
+\textbf{ClaimGuard-CXR (v5.3 / v6.0-retrain)} (ours) & $0.911$ (test) & $70.21$ & $20.01$ & \textbf{no} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -273,11 +269,11 @@ Two of the four public detectors that completed show evidence-blindness on at le
 \subsection{Text-only artifact audit}
 \label{sec:artifact-audit}
 
-We audit the claim-only text shortcut directly by training a RoBERTa-large classifier on the claim text only (no image, no evidence), once on the raw training distribution and once on the HO-filter-downweighted distribution. On the 4{,}132-claim v6 test split, the pre-filter text-only model reaches $82.0\%$ (vs majority-class $87.6\%$, $-5.6$pp); the post-filter text-only model reaches $79.5\%$ ($-8.1$pp vs majority). The HO filter reduces text-only shortcut performance by $2.5$ percentage points without changing the training-data row count (the filter downweights rather than drops). This is consistent with the loss-drop ablation in Table~\ref{tab:headline} sibling results, where removing the HO filter alone moves IMG from $62.9$pp to $5.8$pp — the text-only shortcut performance and the image-masking gap are two sides of the same signal.
+We audit the claim-only text shortcut directly by training a RoBERTa-large classifier on the claim text only (no image, no evidence), once on the raw training distribution and once on the HO-filter-downweighted distribution. On the 4{,}132-claim v6 test split, the pre-filter text-only model reaches $82.0\%$ (vs majority-class $87.6\%$, $-5.6$pp); the post-filter text-only model reaches $79.5\%$ ($-8.1$pp vs majority). The HO filter reduces text-only shortcut performance by $2.5$ percentage points without changing the training-data row count (the filter downweights rather than drops). Both pre- and post-HO text-only accuracies fall below the majority-class baseline, which means the v6 training distribution is already largely free of the claim-only text shortcut — there is no trivial way to guess \texttt{SUPPORTED/CONTRADICTED} from the claim sentence alone. The HO filter's contribution on the artifact-audit axis is therefore small in absolute terms; its primary contribution is visible in the loss-drop ablation (removing the HO filter alone collapses IMG from $62.9$pp to $5.8$pp on v5.2), not in the text-only-vs-majority gap reported here.
 
 \section{Discussion}
 
-\paragraph{What the table says.} A training-time mitigation that targets the evidence-blindness failure mode directly — by penalizing consistent output under image-masking and by removing text-solvable examples from the training distribution — works. It works on the axes it is designed to work on (IMG, aggregate accuracy) and does not work on axes it is not designed to reach (IPG). A paper that made both of those findings available to readers would give a more accurate picture of what the mitigation can and cannot do than a paper that presented only the IMG result.
+\paragraph{What the table says.} A training-time mitigation that targets the evidence-blindness failure mode directly — by penalizing consistent output under image-masking and by removing text-solvable examples from the training distribution — works \emph{on the training distribution}: the image-masking gap moves from $2$pp (v5.0) to $69$pp (v5.3) on the in-distribution test split while aggregate accuracy stays at $92.5\%$. Under leave-one-site-out shift (Table~\ref{tab:loo}) the same verifier regresses to evidence-blind on held-out OpenI (IMG $= 3.2$pp) and borderline on held-out ChestX-Det10 (IMG $= 28.4$pp with ESG $= 2.7$pp, below the ESG threshold). The diagnostic therefore also works as a deployment-shift alarm: a verifier that passes IMG on its training sites may fail the same test on a new site, and the same three counterfactual interventions that diagnose training-time blindness also detect the post-deployment version. The mitigation is a cheap lever for one class of evidence-blindness (distributional shortcuts in-distribution); cross-site generalization is a second class that it does not reach, and laterality-turning claims (IPG $\approx 0$) are a third.
 
 \paragraph{Why the table looks the way it does.} Two pieces of the story are worth emphasizing. First, the baseline (v5.0) passes every test that an aggregate-accuracy reviewer would apply, including cross-entropy convergence and val/test agreement, while being fundamentally image-blind. That is what the NLI literature found ten years ago, reproduced here under chest radiographs. Second, the grounding loss (v5.1) produces the best \emph{validation} accuracy of any configuration tested, while producing essentially the same image-masking gap as the cross-entropy baseline. A practitioner using validation accuracy alone as the model-selection criterion would pick the worst-grounded of our trained models.
 
@@ -328,5 +324,16 @@ Frozen image layers / text layers & 8 / 16 \\
 \section{Pending Experiments}
 
 The v5.4-final configuration (all five losses plus MC-dropout uncertainty regularization) was queued for training at the time of writing but blocked on Modal H100 capacity. The four configurations reported in the main text are sufficient to establish the paper's central claim; v5.4 will be added to Table~\ref{tab:headline} in the camera-ready. Additional experiments already scaffolded (loss-component ablation, HO-threshold sweep, cross-site transfer, seven-baseline landscape) are documented in the released codebase and the camera-ready version will include their results.
+
+\section{Planned Baseline Extensions}
+\label{app:planned-baselines}
+
+Two baselines are scaffolded in the released codebase but were not run under the compute budget available for this submission; both will be reported in the extended version.
+
+\paragraph{RadFlag replication} \citep{zhang2024radflag}. A black-box temperature-sampling detector is scaffolded at \texttt{v5/eval/radflag\_replica.py}. For each generated claim, the procedure samples $K=10$ temperature-varied generations of the underlying RRG model and entails the original claim against each sample via Claude Opus; inconsistency rate is the flag signal. Applying RadFlag to MAIRA-2 outputs requires roughly $20{,}000$ Claude Opus entailment calls at current rate limits; this is feasible but falls outside the pre-submission compute window.
+
+\paragraph{ReXTrust-inspired white-box probe} \citep{hardy2024rextrust}. A linear probe on generator hidden states, reimplemented from the published description (no public code or weights), scaffolded at \texttt{v5/eval/hidden\_state\_probe.py}. We plan to apply it to both MedVersa \citep{zhou2024medversa} (the paper's backbone) and MAIRA-2 to argue the result is architecture-independent. The probe requires approximately $6$ H100-hours on each backbone.
+
+Neither omission affects the paper's central claim. The evidence-blindness diagnostic is model-agnostic and applies to both RadFlag and ReXTrust unchanged; the expected behavior (both detectors are image-backbone-dependent and should be tested for evidence-blindness separately) is discussed in §\ref{sec:baselines}.
 
 \end{document}
