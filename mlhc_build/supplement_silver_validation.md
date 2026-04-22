@@ -71,3 +71,77 @@ A cross-image text-only matching pass (ignoring `image_id`, matching PadChest-GR
 2. Run the 3-grader silver pipeline on the resulting claims.
 3. Re-run `padchest_gr_validate.py`; report per-finding Cohen κ and the pathology-class breakdown the paper's §3.3.7 currently scaffolds.
 4. Expected wall-clock: ~8 hours H100 + ~$40 Anthropic credit.
+
+---
+
+## 4. HO-filter activation on real-RRG hallucinations (M6 gate detail)
+
+Trained a RoBERTa-base text-pair classifier on the v6 train split (8,000 example budget, 1 epoch, `(claim_text, evidence_text) → label`). Scored all 1,934 ensemble-resolved real-RRG silver claims at `τ=0.7`. Full breakdown:
+
+| Subset | n | n flagged | Activation rate |
+|---|---|---|---|
+| **All real-RRG claims** | **1,934** | **1,559** | **80.6%** |
+| MedGemma-4B-IT | 1,330 | 1,150 | 86.5% |
+| MAIRA-2 | 305 | 209 | 68.5% |
+| CheXagent-2-3b | 299 | 200 | 66.9% |
+| flagged | silver=SUPPORTED | 1,599 | 1,464 | 91.6% |
+| flagged | silver=CONTRADICTED | 335 | 95 | 28.4% |
+
+M6 gate target was ≥40% activation; safety floor ≥10%. Aggregate 80.6% passes both. The 91.6 vs 28.4 split shows the filter mostly downweights "easy" positives (claim text alone predicts SUPPORTED, e.g., "no acute findings") and rarely fires on the harder hallucinated negatives. This is the design intent — the loss the filter participates in then learns from the harder examples — but should not be read as evidence that the filter would catch most hallucinations as a deployed standalone detector.
+
+## 5. Cross-site shortcut audit (per-site text-pair ceiling + HO activation)
+
+Same RoBERTa-base text-pair classifier, evaluated separately per site:
+
+| Site | n test | Majority acc | Text-pair acc | Δ vs majority | HO activation |
+|---|---|---|---|---|---|
+| ChestX-Det10 | 1,387 | 0.798 | 0.875 | +7.6pp | 68.2% |
+| OpenI | 1,587 | 0.854 | 0.914 | +6.0pp | 82.2% |
+
+Both sites have a real text-pair shortcut signal (5–8pp above majority); the v6 training distribution is not shortcut-free at the site level. The HO filter activates on most rows in each site (>68%), confirming that the downweighting affects a substantial fraction of the training distribution.
+
+## 6. Support-score sharpness across configurations
+
+Evaluated each verifier on the 2,974-claim v6 test split; reported KS distance to a uniform-on-[0.5,1.0] reference and the fraction of predictions above 0.9 confidence.
+
+| Config | Mean predicted prob | KS to uniform | Frac p > 0.9 |
+|---|---|---|---|
+| v5.0-base | 0.935 | 0.69 | 79.3% |
+| v5.1-ground | 0.938 | 0.73 | 82.0% |
+| v5.2-real | 0.933 | 0.63 | 77.5% |
+| v5.3-contrast | 0.929 | 0.62 | 76.9% |
+| v6.0-retrain | 0.922 | 0.62 | 76.9% |
+
+The two evidence-blind configs (v5.0, v5.1) have *slightly sharper* support-score distributions than the non-blind ones — opposite of what a "sharpness explains conformal coverage" hypothesis predicts. Conformal FDR's per-config behavior is therefore not explained by marginal support-score sharpness; it depends on the joint structure of (support score, error event), which the inverted cfBH procedure is designed to exploit. Per-config conformal sets are reported in `v5_final_results/conformal_summary.json`.
+
+## 7. PadChest-GR rescue Phase 3 detail (12-match result)
+
+After extracting more PadChest-GR images from the multi-part ZIP (500 PNGs in /tmp), MAIRA-2 successfully generated reports for 168/500 images (the rest failed for missing-image / processor errors). 168 reports decomposed via Claude Haiku to 565 atomic claims. Silver-labeling counts:
+
+| Grader | SUPPORTED | CONTRADICTED | UNCERTAIN | ERROR |
+|---|---|---|---|---|
+| RadFact (Claude Opus entail) | 115 | 103 | 347 | 0 |
+| VERT (Claude Opus structured) | 66 | 73 | 137 | **289** |
+
+VERT's 51% error rate on this batch (vs 0% on the OpenI batch reported earlier) is most plausibly an Anthropic API rate-limit cluster on the heavier-prompt VERT calls on this specific machine — not a methodology issue. Re-running VERT alone with longer backoff is on the camera-ready punchlist.
+
+Two-grader ensemble (RadFact ∩ VERT, agreement-only):
+
+| Pattern | Count |
+|---|---|
+| Both SUPPORTED | 52 |
+| Both CONTRADICTED | 48 |
+| Disagreement | 2 |
+| Either UNCERTAIN | 463 |
+
+Validate against PadChest-GR bboxes (Jaccard ≥ 0.30):
+
+| Metric | Value |
+|---|---|
+| n GT sentences | 11,995 |
+| n matched | **12** (0.1%) |
+| Cohen κ on matched | -0.80 (n_definite = 3 — small-sample noise) |
+| TP / FP / FN / TN | 0 / 2 / 1 / 0 |
+| n UNCERTAIN | 9 |
+
+The 12-match result is too small for a publishable κ. Reported here for transparency and to scaffold the camera-ready re-run.

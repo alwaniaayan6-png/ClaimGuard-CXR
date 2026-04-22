@@ -1128,7 +1128,7 @@ def hidden_state_probe(
                 continue
             rows.append({
                 "claim_id": r["claim_id"],
-                "image_path": r.get("image_path", f"{r['image_id']}.png"),
+                "image_path": r.get("image_path") or f"openi/{r['image_id']}.png",
                 "claim_text": r["claim_text"],
                 "label": r["final_label"],
             })
@@ -1223,6 +1223,810 @@ def padchest_gr_validate(
     P(out_stats).write_text(json.dumps(stats, indent=2, default=str))
     _write_status("padchest_gr_validate", {"status": "ok", "stats": stats})
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Local entrypoints (convenience)
+# ---------------------------------------------------------------------------
+# Day 9: RadFlag replication on MAIRA-2 outputs
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu=_H100,
+    timeout=60 * 60 * 3,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def radflag_replicate(
+    claims_jsonl: str = "/data/v6_silver/claims_gated.jsonl",
+    image_root: str = "/data",
+    rrg_model: str = "maira-2",
+    n_resamples: int = 6,
+    n_claims: int = 200,
+    out_jsonl: str = "/data/v6_results/radflag_maira2.jsonl",
+    out_summary: str = "/data/v6_results/radflag_maira2_summary.json",
+) -> dict:
+    """Run RadFlag (Zhang et al. 2024) replication on MAIRA-2-generated claims.
+
+    For each target claim: re-run MAIRA-2 ``n_resamples`` times at temperature 1.0,
+    decompose alternatives via Haiku, check entailment via Claude Opus.
+    Reports flagged-vs-not-flagged counts and per-claim consistency rate.
+
+    Reduced n_resamples to 6 (paper used 10) to fit budget; this is a known
+    deviation reported in the supplement.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+
+    volume.reload()
+
+    from v5.eval.radflag_replica import RadFlagDetector, run_radflag_sweep
+    from v5.eval.rrg_generate import MAIRA2Generator, _load_pil
+    from v5.eval.radfact_labeler import RadFactLabeler
+
+    # Load only MAIRA-2 generated claims (the paper applies RadFlag to MAIRA-2 outputs)
+    rows: list[dict] = []
+    with open(claims_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if str(r.get("rrg_model", "")) == rrg_model:
+                rows.append(r)
+                if len(rows) >= n_claims:
+                    break
+
+    if not rows:
+        return {"error": f"no claims found for rrg_model={rrg_model}"}
+
+    # Resolve image_path for each row by joining image_root + image_id
+    # (assumes RRG generation manifest includes image_path; if not, derive from image_id)
+    image_root_p = P(image_root)
+    for r in rows:
+        if "image_path" not in r:
+            r["image_path"] = str(image_root_p / "openi" / f"{r['image_id']}.png")
+
+    # Load MAIRA-2 once and define resample_fn
+    gen = MAIRA2Generator(device="cuda")
+
+    def resample_fn(image, temperature: float, seed: int) -> str:
+        # MAIRA-2 generate doesn't expose temperature/seed directly via the
+        # processor's format_and_preprocess_reporting_input call. We use the
+        # underlying model.generate kwargs to inject sampling.
+        import torch
+        try:
+            inputs = gen.processor.format_and_preprocess_reporting_input(
+                current_frontal=image, current_lateral=None, prior_frontal=None,
+                prior_report=None, indication="", technique="", comparison="",
+                return_tensors="pt", get_grounding=False,
+            )
+        except Exception:
+            inputs = gen.processor(images=image, text="Describe the findings.", return_tensors="pt")
+        inputs = {k: v.to(gen.device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        if "pixel_values" in inputs and hasattr(inputs["pixel_values"], "to"):
+            inputs["pixel_values"] = inputs["pixel_values"].to(gen.model.dtype)
+        torch.manual_seed(seed)
+        with torch.no_grad():
+            out = gen.model.generate(
+                **inputs, max_new_tokens=256, do_sample=True,
+                temperature=temperature, top_p=0.95,
+            )
+        n_input = inputs["input_ids"].shape[-1] if "input_ids" in inputs else 0
+        gen_ids = out[0, n_input:] if n_input else out[0]
+        tok = getattr(gen.processor, "tokenizer", gen.processor)
+        return tok.decode(gen_ids, skip_special_tokens=True).strip()
+
+    rf_labeler_for_decompose = RadFactLabeler()
+
+    def decompose_fn(report: str) -> list[str]:
+        try:
+            return rf_labeler_for_decompose.decompose(report)
+        except Exception:
+            # rule-based fallback: split on periods
+            return [s.strip() for s in report.split(".") if s.strip()][:6]
+
+    def image_loader(path: str) -> "Image.Image":
+        return _load_pil(P(path))
+
+    detector = RadFlagDetector(
+        resample_fn=resample_fn,
+        decompose_fn=decompose_fn,
+        n_resamples=n_resamples,
+        temperature=1.0,
+        consistency_threshold=0.5,
+    )
+
+    counts = run_radflag_sweep(detector, rows, image_loader, P(out_jsonl), log_every=5)
+    summary = {
+        "n_claims_evaluated": sum(counts.values()),
+        "n_flagged_hallucination": counts.get("flagged", 0),
+        "n_consistent": counts.get("not_flagged", 0),
+        "n_error": counts.get("error", 0),
+        "rrg_model": rrg_model,
+        "n_resamples": n_resamples,
+    }
+    P(out_summary).write_text(json.dumps(summary, indent=2))
+    _write_status("radflag_replicate", {"status": "ok", "summary": summary})
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Day 10: HO-filter activation rate on real-RRG hallucinations (M6 gate)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu=_H100,
+    timeout=60 * 60 * 1,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def ho_filter_activation_real_rrg(
+    ensemble_jsonl: str = "/data/v6_silver/ensemble.jsonl",
+    train_jsonl: str = "/data/groundbench_v5/all_v6/groundbench_v6_train.jsonl",
+    out_json: str = "/data/v6_results/ho_filter_rrg_activation.json",
+    threshold: float = 0.7,
+) -> dict:
+    """Train the HO filter (RoBERTa-large text-only) on the v6 train split,
+    score every real-RRG silver claim, count what fraction are flagged.
+
+    M6 gate: target ≥ 40% activation. If < 10%, the mitigation does not transfer
+    from synthetic to real hallucinations (paper claim weakens to in-distribution
+    only). Reports activation rate, distribution of flagged silver labels, and
+    breakdown by RRG model.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+    from collections import Counter
+
+    volume.reload()
+
+    # Load ensemble silver claims (real-RRG)
+    rows: list[dict] = []
+    with open(ensemble_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            if d.get("final_label") in {"SUPPORTED", "CONTRADICTED"}:
+                rows.append(d)
+
+    # Train an HO classifier on the v6 train split (text-pair, RoBERTa-base)
+    # then score each real-RRG silver claim text-only.
+    import torch
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+    model_name = "roberta-base"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    classifier = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2).cuda()
+
+    # Train one epoch on text-pair data (claim, evidence) -> y
+    train_rows: list[dict] = []
+    with open(train_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            if d.get("gt_label") in {"SUPPORTED", "CONTRADICTED"}:
+                train_rows.append(d)
+
+    optim = torch.optim.AdamW(classifier.parameters(), lr=2e-5)
+    classifier.train()
+    bs = 16
+    import random as _r
+    _r.seed(42)
+    _r.shuffle(train_rows)
+    for i in range(0, min(len(train_rows), 8000), bs):
+        batch = train_rows[i:i + bs]
+        texts_a = [r["claim_text"] for r in batch]
+        texts_b = [r.get("evidence_text") or "" for r in batch]
+        ys = torch.tensor([0 if r["gt_label"] == "SUPPORTED" else 1 for r in batch]).cuda()
+        enc = tokenizer(texts_a, texts_b, max_length=256, padding="max_length",
+                        truncation=True, return_tensors="pt").to("cuda")
+        loss = classifier(**enc, labels=ys).loss
+        loss.backward()
+        optim.step()
+        optim.zero_grad()
+
+    # Score each real-RRG claim text-PAIR (claim, evidence) — matches the
+    # text-pair signature the HO filter trains with. Pre-flight bug catch:
+    # claim-only scoring would distribution-shift the classifier away from its
+    # training inputs, invalidating the activation rate.
+    classifier.eval()
+    n_total = len(rows)
+    n_flagged = 0
+    flagged_by_model: dict[str, int] = Counter()
+    flagged_by_label: dict[str, int] = Counter()
+    seen_by_model: dict[str, int] = Counter()
+    with torch.no_grad():
+        for j in range(0, n_total, bs):
+            batch = rows[j:j + bs]
+            texts_a = [r.get("claim_text", "") for r in batch]
+            texts_b = [r.get("evidence_text") or r.get("reference_excerpt") or "" for r in batch]
+            enc = tokenizer(texts_a, texts_b, max_length=256, padding="max_length",
+                            truncation="only_second", return_tensors="pt").to("cuda")
+            logits = classifier(**enc).logits
+            probs = torch.softmax(logits, dim=-1)
+            for k, r in enumerate(batch):
+                ytrue = 0 if r["final_label"] == "SUPPORTED" else 1
+                conf = float(probs[k, ytrue].item())
+                seen_by_model[r.get("rrg_model", "?")] += 1
+                if conf >= threshold:
+                    n_flagged += 1
+                    flagged_by_model[r.get("rrg_model", "?")] += 1
+                    flagged_by_label[r["final_label"]] += 1
+
+    activation_rate = n_flagged / max(1, n_total)
+    summary = {
+        "n_real_rrg_claims": n_total,
+        "n_flagged": n_flagged,
+        "activation_rate": activation_rate,
+        "threshold": threshold,
+        "by_rrg_model": {k: {"flagged": v, "total": seen_by_model.get(k, 0),
+                             "rate": v / max(1, seen_by_model.get(k, 0))}
+                         for k, v in flagged_by_model.items()},
+        "by_silver_label": dict(flagged_by_label),
+        "m6_gate_pass": activation_rate >= 0.10,  # paper's minimum threshold
+    }
+    P(out_json).parent.mkdir(parents=True, exist_ok=True)
+    P(out_json).write_text(json.dumps(summary, indent=2))
+    _write_status("ho_filter_activation_real_rrg", {"status": "ok", "summary": summary})
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Day 10: cross-site mechanism diagnostic
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu=_H100,
+    timeout=60 * 60 * 1,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def cross_site_mechanism(
+    train_jsonl: str = "/data/groundbench_v5/all_v6/groundbench_v6_train.jsonl",
+    test_jsonl: str = "/data/groundbench_v5/all_v6/groundbench_v6_test.jsonl",
+    out_json: str = "/data/v6_results/cross_site_mechanism.json",
+    threshold: float = 0.7,
+) -> dict:
+    """Per-site: HO filter activation rate, text-only classifier accuracy.
+
+    Trains a single text-only RoBERTa classifier on the full v6 train, then
+    evaluates it ON EACH SITE's test slice. Reports text-only ceiling per site
+    (does the verifier need the image to beat majority?) and HO activation rate
+    per site (is the shortcut equally exploitable across sites?).
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+    from collections import Counter
+    import torch
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+    volume.reload()
+
+    # Load train + test
+    def _load(path: str) -> list[dict]:
+        out: list[dict] = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                d = json.loads(line)
+                if d.get("gt_label") in {"SUPPORTED", "CONTRADICTED"}:
+                    out.append(d)
+        return out
+
+    train_rows = _load(train_jsonl)
+    test_rows = _load(test_jsonl)
+
+    model_name = "roberta-base"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    cls = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2).cuda()
+
+    optim = torch.optim.AdamW(cls.parameters(), lr=2e-5)
+    cls.train()
+    bs = 16
+    import random as _r
+    _r.seed(42)
+    _r.shuffle(train_rows)
+    for i in range(0, min(len(train_rows), 8000), bs):
+        batch = train_rows[i:i + bs]
+        ta = [r["claim_text"] for r in batch]
+        tb = [r.get("evidence_text") or "" for r in batch]
+        ys = torch.tensor([0 if r["gt_label"] == "SUPPORTED" else 1 for r in batch]).cuda()
+        enc = tokenizer(ta, tb, max_length=256, padding="max_length", truncation=True,
+                        return_tensors="pt").to("cuda")
+        loss = cls(**enc, labels=ys).loss
+        loss.backward()
+        optim.step()
+        optim.zero_grad()
+
+    # Per-site evaluation
+    cls.eval()
+    by_site: dict[str, dict] = {}
+    sites_seen = sorted({r.get("source_site") or r.get("site") or "unknown" for r in test_rows})
+    for site in sites_seen:
+        site_rows = [r for r in test_rows
+                     if (r.get("source_site") or r.get("site") or "unknown") == site]
+        if not site_rows:
+            continue
+        n = len(site_rows)
+        majority = max(Counter(r["gt_label"] for r in site_rows).values()) / max(1, n)
+        n_correct = 0
+        n_flagged = 0
+        with torch.no_grad():
+            for j in range(0, n, bs):
+                batch = site_rows[j:j + bs]
+                ta = [r["claim_text"] for r in batch]
+                tb = [r.get("evidence_text") or "" for r in batch]
+                ys = torch.tensor([0 if r["gt_label"] == "SUPPORTED" else 1 for r in batch]).cuda()
+                enc = tokenizer(ta, tb, max_length=256, padding="max_length",
+                                truncation=True, return_tensors="pt").to("cuda")
+                logits = cls(**enc).logits
+                preds = logits.argmax(dim=-1)
+                probs = torch.softmax(logits, dim=-1)
+                n_correct += int((preds == ys).sum().item())
+                for k in range(len(batch)):
+                    if float(probs[k, ys[k]].item()) >= threshold:
+                        n_flagged += 1
+        by_site[site] = {
+            "n_test": n,
+            "majority_class_acc": majority,
+            "text_only_acc": n_correct / max(1, n),
+            "delta_vs_majority_pp": (n_correct / max(1, n) - majority) * 100,
+            "ho_activation_rate": n_flagged / max(1, n),
+        }
+    payload = {
+        "by_site": by_site,
+        "threshold": threshold,
+        "interpretation": ("text_only_acc - majority_class_acc gives the per-site "
+                           "shortcut ceiling; ho_activation_rate is the fraction "
+                           "of rows the HO filter would downweight."),
+    }
+    P(out_json).parent.mkdir(parents=True, exist_ok=True)
+    P(out_json).write_text(json.dumps(payload, indent=2))
+    _write_status("cross_site_mechanism", {"status": "ok", "result": payload})
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Day 10: support-score sharpness extraction (for histogram + KS distance)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu=_H100,
+    timeout=60 * 60 * 1,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def extract_support_scores(
+    ckpt_path: str,
+    test_jsonl: str = "/data/groundbench_v5/all_v6/groundbench_v6_test.jsonl",
+    image_root: str = "/data",
+    out_json: str = "/data/v6_results/support_scores.json",
+    tag: str = "v",
+) -> dict:
+    """Score the test set with a checkpoint and return predicted-class probabilities.
+
+    Used to plot support-score histograms + compute KS distance to uniform across
+    v5.0/v5.1/v5.2/v5.3 / v6.0-retrain. The "support score" we extract is the
+    softmax probability of the predicted class — sharper distributions (more mass
+    near 1.0) make conformal calibration informative; near-uniform distributions
+    collapse the conformal selection set to empty.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+    import torch
+    from torch.utils.data import DataLoader
+
+    volume.reload()
+    from v5.model import V5Config, build_v5_tokenizer, build_v5_model
+    from v5.train import V5TrainConfig
+    from v5.eval.evidence_blindness import _loaded_dataset
+
+    cfg_m = V5Config()
+    tok = build_v5_tokenizer(cfg_m)
+    model = build_v5_model(cfg_m).cuda()
+    state = torch.load(ckpt_path, map_location="cuda")
+    if isinstance(state, dict) and "model_state" in state:
+        state = state["model_state"]
+    model.load_state_dict(state, strict=False)
+    model.eval()
+
+    train_cfg = V5TrainConfig(
+        train_jsonl=P(test_jsonl), val_jsonl=P(test_jsonl),
+        out_dir=P("/tmp/_supp"), image_root=P(image_root),
+    )
+    ds = _loaded_dataset(P(test_jsonl), P(image_root), tok, train_cfg)
+    loader = DataLoader(ds, batch_size=32, shuffle=False, num_workers=2)
+
+    scores_pred: list[float] = []
+    scores_true: list[float] = []
+    labels: list[int] = []
+    with torch.no_grad():
+        for batch in loader:
+            batch = {k: v.cuda() if hasattr(v, "cuda") else v for k, v in batch.items()}
+            out = model(
+                pixel_values=batch["pixel_values"],
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+            )
+            logits = out["verdict_logits"] if isinstance(out, dict) else out.verdict_logits
+            probs = torch.softmax(logits, dim=-1)
+            preds = probs.argmax(dim=-1)
+            for k in range(probs.shape[0]):
+                pred_p = float(probs[k, preds[k]].item())
+                ytrue = int(batch["labels"][k].item())
+                true_p = float(probs[k, ytrue].item())
+                scores_pred.append(pred_p)
+                scores_true.append(true_p)
+                labels.append(ytrue)
+
+    # KS to uniform
+    import numpy as np
+    arr = np.array(scores_pred)
+    sorted_arr = np.sort(arr)
+    n = len(sorted_arr)
+    cdf_emp = np.arange(1, n + 1) / n
+    # Uniform on [0.5, 1.0] (predicted-class prob is in this range for binary)
+    cdf_unif = (sorted_arr - 0.5) / 0.5
+    cdf_unif = np.clip(cdf_unif, 0, 1)
+    ks = float(np.max(np.abs(cdf_emp - cdf_unif)))
+
+    payload = {
+        "tag": tag,
+        "ckpt_path": ckpt_path,
+        "n": n,
+        "scores_pred_class": scores_pred,
+        "scores_true_class": scores_true,
+        "labels": labels,
+        "ks_distance_to_uniform": ks,
+        "mean_pred_prob": float(arr.mean()),
+        "frac_above_0_9": float((arr > 0.9).mean()),
+    }
+    P(out_json).parent.mkdir(parents=True, exist_ok=True)
+    P(out_json).write_text(json.dumps(payload))
+    _write_status(f"extract_support_scores_{tag}", {"status": "ok", "ks": ks, "n": n,
+                                                     "mean_pred_prob": payload["mean_pred_prob"]})
+    return {"tag": tag, "ks": ks, "n": n, "mean_pred_prob": payload["mean_pred_prob"],
+            "frac_above_0_9": payload["frac_above_0_9"]}
+
+
+# ---------------------------------------------------------------------------
+# Day 11: PadChest-GR rescue — RRG on PadChest-GR images, silver, validate
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu=_H100,
+    timeout=60 * 60 * 2,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def padchest_gr_rrg_rescue(
+    padchest_records: str = "/data/groundbench_v5/padchest_gr_records.jsonl",
+    image_root: str = "/data",
+    n_images: int = 200,
+    out_jsonl: str = "/data/v6_rrg/generations_padchest_gr.jsonl",
+) -> dict:
+    """Generate MAIRA-2 reports on n PadChest-GR images, write JSONL of (image_id, report).
+
+    PadChest-GR images ship as a 37-part split ZIP archive at
+    ``/data/padchest_gr_raw/Padchest_GR_files/PadChest_GR.zip.{001..037}``.
+    On first call, this function joins the parts to ``/tmp/PadChest_GR.zip``,
+    extracts to ``/tmp/padchest_extracted/``, and runs MAIRA-2 over the first
+    ``n_images`` extracted PNGs that match a study_id in the records JSONL.
+    The extracted directory is ephemeral (lives only in the container's /tmp);
+    we cache the join+extract in /tmp so reruns within the same container reuse.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+    import subprocess
+    import os
+    import glob
+
+    volume.reload()
+    from v5.eval.rrg_generate import MAIRA2Generator, _load_pil
+
+    # --- Join + extract zips on first run ---
+    extracted_dir = P("/tmp/padchest_extracted")
+    if not extracted_dir.exists() or not any(extracted_dir.rglob("*.png")):
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+        zip_parts_glob = "/data/padchest_gr_raw/Padchest_GR_files/PadChest_GR.zip.*"
+        parts = sorted(glob.glob(zip_parts_glob))
+        if not parts:
+            return {"error": f"no zip parts at {zip_parts_glob}"}
+        joined = P("/tmp/PadChest_GR.zip")
+        if not joined.exists():
+            print(f"[padchest_gr_rrg_rescue] joining {len(parts)} zip parts → {joined}")
+            with open(joined, "wb") as wfh:
+                for part in parts:
+                    with open(part, "rb") as rfh:
+                        # 4MB chunks
+                        while True:
+                            chunk = rfh.read(4 * 1024 * 1024)
+                            if not chunk:
+                                break
+                            wfh.write(chunk)
+            print(f"[padchest_gr_rrg_rescue] joined size = {joined.stat().st_size / 1e9:.1f} GB")
+        # Extract using python's zipfile (avoids apt-installing unzip in image).
+        # Limit to first n_images*3 PNGs to save container disk.
+        budget = n_images * 3
+        print(f"[padchest_gr_rrg_rescue] extracting up to {budget} PNGs via zipfile")
+        import zipfile
+        try:
+            with zipfile.ZipFile(joined) as zf:
+                names = [n for n in zf.namelist() if n.lower().endswith(".png")]
+                print(f"[padchest_gr_rrg_rescue] zip contains {len(names)} PNGs; extracting first {budget}")
+                for n in names[:budget]:
+                    zf.extract(n, str(extracted_dir))
+        except Exception as exc:
+            print(f"[padchest_gr_rrg_rescue] zipfile extract failed: {exc}")
+
+    extracted_pngs: dict[str, P] = {}
+    for png in extracted_dir.rglob("*.png"):
+        extracted_pngs[png.name] = png
+    print(f"[padchest_gr_rrg_rescue] extracted_dir has {len(extracted_pngs)} PNGs")
+
+    rows: list[dict] = []
+    seen_studies: set[str] = set()
+    with open(padchest_records) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            sid = str(r.get("study_id", ""))
+            if sid in seen_studies or not sid:
+                continue
+            ipath = r.get("image_path") or ""
+            seen_studies.add(sid)
+            # Use study_id for the canonical id (matches padchest_gr_validate
+            # which prefers study_id as the joining key).
+            rows.append({
+                "study_id": sid,
+                "image_id_full": str(r.get("image_id", "")),
+                "image_path": ipath,
+            })
+            if len(rows) >= n_images:
+                break
+
+    if not rows:
+        return {"error": "no PadChest-GR images found"}
+
+    gen = MAIRA2Generator(device="cuda")
+    P(out_jsonl).parent.mkdir(parents=True, exist_ok=True)
+    n_ok = 0
+    n_err = 0
+    with open(out_jsonl, "w") as fh:
+        for i, r in enumerate(rows):
+            # Primary: extracted image by image_id filename
+            ip = extracted_pngs.get(r["image_id_full"])
+            if ip is None:
+                # Fallback: maybe the record's absolute image_path resolves on volume
+                cand = P(r["image_path"]) if r["image_path"] else None
+                if cand is not None and cand.exists():
+                    ip = cand
+            if ip is None or not ip.exists():
+                n_err += 1
+                continue
+            try:
+                pil = _load_pil(ip)
+                result = gen.generate(pil, image_id=r["study_id"])
+                fh.write(json.dumps({"model": "maira-2",
+                                     "study_id": r["study_id"],
+                                     "image_id": r["study_id"],  # canonical id used downstream
+                                     "image_path": str(ip),
+                                     "generated_report": result.generated_report,
+                                     "generation_time_s": result.generation_time_s}) + "\n")
+                fh.flush()
+                n_ok += 1
+            except Exception as exc:
+                n_err += 1
+                print(f"[padchest_gr_rrg_rescue] err on {r['study_id']}: {exc}")
+            if (i + 1) % 25 == 0:
+                print(f"[padchest_gr_rrg_rescue] {i+1}/{len(rows)} ok={n_ok} err={n_err}")
+    payload = {"status": "ok", "n_ok": n_ok, "n_err": n_err, "output": out_jsonl}
+    _write_status("padchest_gr_rrg_rescue", payload)
+    return payload
+
+
+@app.function(
+    image=image,
+    cpu=2,
+    timeout=60 * 60 * 1,
+    volumes={"/data": volume},
+    secrets=secrets,
+)
+def padchest_gr_rescue_chain(
+    rrg_jsonl: str = "/data/v6_rrg/generations_padchest_gr.jsonl",
+    padchest_records: str = "/data/groundbench_v5/padchest_gr_records.jsonl",
+    out_dir: str = "/data/v6_silver_padchest",
+) -> dict:
+    """Decompose PadChest-GR RRG into claims, silver-label with RadFact + VERT
+    (skip GREEN — needs GPU; run separately if desired), then re-run validate.
+
+    Output: claims, references, radfact_labels, vert_labels, ensemble (without
+    GREEN), and a stub ensemble-without-green for validate.
+    """
+    import sys
+    sys.path.insert(0, "/root/verifact")
+    from pathlib import Path as P
+    import json
+    import hashlib
+
+    volume.reload()
+    from v5.eval.radfact_labeler import RadFactLabeler, run_radfact_sweep
+    from v5.eval.vert_labeler import VertLabeler, run_vert_sweep
+    from v5.eval.padchest_gr_validate import validate
+
+    rf_decomp = RadFactLabeler()
+
+    out = P(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # Build references keyed by study_id (the canonical id padchest_gr_validate
+    # uses for join — see padchest_gr_validate.py:73 which prefers study_id).
+    refs: dict[str, str] = {}
+    with open(padchest_records) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            sid = str(r.get("study_id", ""))
+            if not sid:
+                continue
+            text = r.get("report_en") or r.get("report_es") or ""
+            if sid not in refs and text:
+                refs[sid] = text
+
+    references_jsonl = out / "references.jsonl"
+    with open(references_jsonl, "w") as fh:
+        for sid, txt in refs.items():
+            fh.write(json.dumps({"image_id": sid, "reference_report": txt}) + "\n")
+
+    # Decompose RRG generations → atomic claims (image_id field set to study_id
+    # so silver_ensemble + padchest_gr_validate can pair correctly)
+    claims_jsonl = out / "claims.jsonl"
+    n_claims = 0
+    n_skipped = 0
+    with open(rrg_jsonl) as fin, open(claims_jsonl, "w") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            sid = r.get("study_id") or r.get("image_id")
+            report = r.get("generated_report", "")
+            if not sid or not report or sid not in refs:
+                n_skipped += 1
+                continue
+            try:
+                phrases = rf_decomp.decompose(report)
+            except Exception:
+                phrases = [s.strip() for s in report.split(".") if s.strip()][:6]
+            for p in phrases:
+                claim_id = hashlib.md5(f"{sid}|{p}".encode()).hexdigest()[:16]
+                fout.write(json.dumps({
+                    "claim_id": claim_id,
+                    "image_id": sid,  # = study_id; matches padchest_gr_validate's join key
+                    "rrg_model": r.get("model", "maira-2"),
+                    "claim_text": p,
+                }) + "\n")
+                n_claims += 1
+
+    # Silver: RadFact + VERT (skip GREEN — needs GPU dispatch to a separate
+    # function; for the rescue, RadFact + VERT is sufficient)
+    radfact_jsonl = out / "radfact_labels.jsonl"
+    vert_jsonl = out / "vert_labels.jsonl"
+    rf_labeler = RadFactLabeler()
+    vt_labeler = VertLabeler()
+    claims = [json.loads(l) for l in open(claims_jsonl) if l.strip()]
+    rf_counts = run_radfact_sweep(rf_labeler, claims, refs, radfact_jsonl)
+    vt_counts = run_vert_sweep(vt_labeler, claims, refs, vert_jsonl)
+
+    # Two-grader rule (NOT silver_ensemble.combine_labels which expects 3 distinct
+    # graders and would silently make the duplicated grader the tiebreaker per
+    # pre-flight catch). Rule: agreement between RadFact and VERT becomes the
+    # final label; disagreement → UNCERTAIN (excluded from agreement metrics).
+    rf_by_id = {}
+    with open(radfact_jsonl) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            rf_by_id[d["claim_id"]] = d.get("label", "UNCERTAIN")
+    vt_by_id = {}
+    with open(vert_jsonl) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            vt_by_id[d["claim_id"]] = d.get("label", "UNCERTAIN")
+
+    ensemble_jsonl = out / "ensemble.jsonl"
+    ensemble_stats = out / "ensemble_stats.json"
+    n_unanimous_sup = n_unanimous_con = n_disagree = n_uncertain = 0
+    with open(ensemble_jsonl, "w") as eh:
+        for c in claims:
+            cid = c["claim_id"]
+            rf = rf_by_id.get(cid, "UNCERTAIN")
+            vt = vt_by_id.get(cid, "UNCERTAIN")
+            if rf == vt and rf in {"SUPPORTED", "CONTRADICTED"}:
+                final = rf
+                conf = "HIGH"
+                if rf == "SUPPORTED":
+                    n_unanimous_sup += 1
+                else:
+                    n_unanimous_con += 1
+            elif rf in {"SUPPORTED", "CONTRADICTED"} and vt in {"SUPPORTED", "CONTRADICTED"}:
+                final = "UNCERTAIN"
+                conf = "LOW"
+                n_disagree += 1
+            else:
+                final = "UNCERTAIN"
+                conf = "LOW"
+                n_uncertain += 1
+            eh.write(json.dumps({
+                "claim_id": cid,
+                "image_id": c["image_id"],
+                "claim_text": c["claim_text"],
+                "rrg_model": c.get("rrg_model", "maira-2"),
+                "final_label": final,
+                "confidence": conf,
+                "radfact_label": rf,
+                "vert_label": vt,
+            }) + "\n")
+
+    stats = {
+        "n_claims": len(claims),
+        "n_unanimous_supported": n_unanimous_sup,
+        "n_unanimous_contradicted": n_unanimous_con,
+        "n_disagreement": n_disagree,
+        "n_uncertain_majority": n_uncertain,
+        "agreement_rate": (n_unanimous_sup + n_unanimous_con) / max(1, len(claims)),
+    }
+    ensemble_stats.write_text(json.dumps(stats, indent=2, default=str))
+
+    # Validate against PadChest-GR sentences with paired study_id
+    validate_jsonl = out / "padchest_gr_validation.jsonl"
+    validate_stats = out / "padchest_gr_validation_stats.json"
+    vstats = validate(P(padchest_records), ensemble_jsonl, validate_jsonl)
+    validate_stats.write_text(json.dumps(vstats, indent=2, default=str))
+
+    payload = {
+        "status": "ok",
+        "n_claims": n_claims,
+        "n_claims_skipped": n_skipped,
+        "n_radfact": rf_counts,
+        "n_vert": vt_counts,
+        "ensemble_stats": stats,
+        "validate_stats": vstats,
+        "output_dir": str(out),
+    }
+    _write_status("padchest_gr_rescue_chain", payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------

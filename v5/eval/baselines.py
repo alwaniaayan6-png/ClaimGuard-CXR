@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -170,21 +171,36 @@ class ClaudeBaseline(BaselineVerifier):
         self.model_id = "claude-3-5-sonnet-20241022"
 
     def predict(self, image, claim, evidence, *, zero_image, flip_image):
+        # Anthropic API rate-limits 50 rpm on Opus / 60 rpm on Sonnet 3.5.
+        # Add explicit 429 retry-with-backoff so a single rate-limit error
+        # doesn't zero out the whole baseline run.
+        import anthropic as _ah
         png = _image_to_png_bytes(image, zeroed=zero_image, flipped=flip_image)
         b64 = base64.b64encode(png).decode("ascii")
-        msg = self.client.messages.create(
-            model=self.model_id,
-            max_tokens=10,
-            system=_API_SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
-                    {"type": "text", "text": f"Claim: {claim}\nEvidence: {evidence}\nVerdict:"},
-                ],
-            }],
-        )
-        return _api_parse(msg.content[0].text if msg.content else "")
+        for attempt in range(5):
+            try:
+                msg = self.client.messages.create(
+                    model=self.model_id,
+                    max_tokens=10,
+                    system=_API_SYSTEM_PROMPT,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64",
+                                                          "media_type": "image/png", "data": b64}},
+                            {"type": "text", "text": f"Claim: {claim}\nEvidence: {evidence}\nVerdict:"},
+                        ],
+                    }],
+                )
+                return _api_parse(msg.content[0].text if msg.content else "")
+            except _ah.RateLimitError:
+                time.sleep(2.0 * (2 ** attempt))
+            except _ah.APIStatusError as exc:
+                if getattr(exc, "status_code", None) in (429, 529):
+                    time.sleep(2.0 * (2 ** attempt))
+                    continue
+                raise
+        raise RuntimeError("Claude baseline: 5 rate-limit retries exhausted")
 
 
 class OpenAIBaseline(BaselineVerifier):
@@ -457,7 +473,7 @@ class MAIRA2Baseline(BaselineVerifier):
     """
 
     model_id = "microsoft/maira-2"
-    max_new_tokens = 8
+    max_new_tokens = 32  # short SUPPORTED/CONTRADICTED + a couple words; 8 was truncating
 
     def __init__(self, device: torch.device | str = "cuda"):
         super().__init__("maira-2")
@@ -481,13 +497,35 @@ class MAIRA2Baseline(BaselineVerifier):
             "claim is consistent with the image, CONTRADICTED otherwise.\n"
             f"Claim: {claim}\nEvidence: {evidence}\nVerdict:"
         )
-        inputs = self.processor(images=pil, text=prompt_text, return_tensors="pt").to(self.device)
-        if "pixel_values" in inputs:
+        # MAIRA-2's generic processor(images=, text=) interface is not exposed
+        # by the trust_remote_code processor — it requires the custom
+        # format_and_preprocess_reporting_input call. Use that with claim+evidence
+        # injected as the indication field, and parse the generated findings text
+        # for SUPPORTED/CONTRADICTED.
+        try:
+            inputs = self.processor.format_and_preprocess_reporting_input(
+                current_frontal=pil,
+                current_lateral=None,
+                prior_frontal=None,
+                prior_report=None,
+                indication=prompt_text,
+                technique="",
+                comparison="",
+                return_tensors="pt",
+                get_grounding=False,
+            )
+        except Exception:
+            # last-ditch fallback for processor variants
+            inputs = self.processor(images=pil, text=prompt_text, return_tensors="pt")
+        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        if "pixel_values" in inputs and hasattr(inputs["pixel_values"], "to"):
             inputs["pixel_values"] = inputs["pixel_values"].to(self.model.dtype)
         out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
-        gen = out[0, inputs["input_ids"].shape[-1]:] if "input_ids" in inputs else out[0]
-        text = self.processor.tokenizer.decode(gen, skip_special_tokens=True)
-        return _api_parse(text[:40])
+        n_input = inputs["input_ids"].shape[-1] if "input_ids" in inputs else 0
+        gen = out[0, n_input:] if n_input else out[0]
+        tokenizer = getattr(self.processor, "tokenizer", self.processor)
+        text = tokenizer.decode(gen, skip_special_tokens=True)
+        return _api_parse(text[:80])
 
 
 # ---------------------------------------------------------------------------

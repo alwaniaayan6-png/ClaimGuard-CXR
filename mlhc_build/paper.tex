@@ -208,7 +208,7 @@ Training and evaluating on synthesized \texttt{CONTRADICTED} claims raises an ob
 \subsection{Silver-label validation against PadChest-GR radiologist bboxes}
 \label{sec:silver-validation}
 
-PadChest-GR ships 11{,}995 radiologist-labeled sentences (7{,}037 positive-finding with bounding boxes, 4{,}958 explicitly-absent from the same radiologist's reports). These constitute the only public claim-level radiologist-grounded set in chest radiology not derived from MIMIC-CXR. The intended validation is per-image pairing — for each PadChest-GR sentence, find the best-aligned silver-labeled claim on the same image and compute agreement — which requires silver labels generated on PadChest-GR images themselves. Because we did not complete the PadChest-GR claim-extraction step (§\ref{sec:limitations}) in time for this submission, our silver labels live on OpenI images only and the \texttt{image\_id} pairing step returned zero matches (details in supplement). An alternative text-only matching pass (PadChest-GR sentence text vs OpenI-image silver claim text across all images) is possible but measures semantic phrasing agreement rather than radiologist-vs-silver grounding agreement, and is not a substitute. The full paired validation is deferred to the camera-ready; the pipeline is scaffolded at \texttt{v5/eval/padchest\_gr\_validate.py}.
+PadChest-GR ships 11{,}995 radiologist-labeled sentences (7{,}037 positive-finding with bounding boxes, 4{,}958 explicitly-absent from the same radiologist's reports). These constitute the only public claim-level radiologist-grounded set in chest radiology not derived from MIMIC-CXR. We attempted the paired validation in three phases. \textbf{Phase 1:} pair PadChest-GR GT sentences against the OpenI-only silver-labeled claim set — yielded zero \texttt{image\_id} matches (disjoint patient-image identifiers). \textbf{Phase 2:} extract 26 PadChest-GR images from the multi-part ZIPs, run MAIRA-2 on them, decompose into 86 atomic claims, silver-label with RadFact + VERT, re-pair by \texttt{study\_id} — also yielded zero matches at the validator's Jaccard $\geq 0.30$ threshold. \textbf{Phase 3:} bumped extraction budget to 500, generated 168 reports, decomposed into 565 claims — yielded 12 matches at Jaccard $\geq 0.30$ from 11{,}995 GT sentences ($0.1\%$ of GT). Of those 12, 9 silver-labels were \textsc{UNCERTAIN} (excluded from agreement metrics), leaving 3 definite labels — too few for a meaningful Cohen $\kappa$ (the apparent $\kappa = -0.8$ is small-sample noise). VERT additionally hit a $51\%$ Anthropic-API error rate on this run, further reducing the usable label count. The Phase-2/3 low match-count is a vocabulary-overlap failure rather than an indexing one: MAIRA-2 on PadChest-GR images produces generic normal-pattern claims (``Heart size is normal'', ``Lungs are clear''), while PadChest-GR's positive-finding sentences are specific pathology descriptions (``Atelectasis in the right middle lung field''). The same image is described in disjoint vocabularies. Lowering the Jaccard threshold to 0.10 would yield matches but they would be on common stop-words rather than clinical content. The right validation requires either an RRG generator whose outputs cover specific findings densely (e.g., a clinical-fine-tuned variant) or a clinical-NER-based matching layer that is finding-aware; both are deferred to the camera-ready. The full pipeline is scaffolded at \texttt{v5/eval/padchest\_gr\_validate.py} and \texttt{v5/modal/v6\_orchestrator.py:padchest\_gr\_rescue\_chain}; supplement §7 reports the 12-match detail.
 
 As a partial indirect signal, the ensemble Krippendorff $\alpha$ on the 2{,}707 real-RRG claims separates leakage-prone and leakage-free graders cleanly: the two MIMIC-free graders (RadFact, VERT) agree at $\alpha = 0.70$, while GREEN (MIMIC-fine-tuned) agrees with RadFact at $\alpha = 0.04$ and with VERT at $\alpha = -0.001$. This is direct evidence that GREEN's label distribution diverges from the two MIMIC-free graders, consistent with the MIMIC-pretraining leakage hypothesis motivating our three-grader design, and argues for reporting silver-label agreement per-subset rather than aggregated.
 
@@ -259,19 +259,91 @@ We evaluate five detectors on the real-RRG claim set under the evidence-blindnes
 \midrule
 BiomedCLIP (zero-shot)         & 0.538 & 8.0   & \textbf{0.0}  & \textbf{yes (ESG)} \\
 MedGemma-4B-IT (as verifier)   & 0.758 & 14.0  & \textbf{2.0}  & \textbf{yes (ESG)} \\
-MAIRA-2 (as verifier)          & --    & --    & --    & pending re-run (processor API mismatch) \\
-Claude 3.5 Sonnet (API)        & --    & --    & --    & pending re-run (rate limits) \\
+MAIRA-2 (as verifier)          & 0.498 & 32.2  & 6.6  & no \\
+RadFlag (MAIRA-2, $K{=}6$)\textsuperscript{$\dagger$} & 0.664 & N/A & N/A & N/A \\
+Claude 3.5 Sonnet (API)        & --    & --    & --    & infra-failed (anthropic 0.42 + claude-3-5-sonnet-20241022 returned no usable response on 500/500 calls; reported as known-broken) \\
 \textbf{ClaimGuard-CXR (v5.3 / v6.0-retrain)} (ours) & $0.911$ (test) & $70.21$ & $20.01$ & \textbf{no} \\
 \bottomrule
 \end{tabular}
+
+\noindent\textsuperscript{$\dagger$}\footnotesize{RadFlag is a hallucination flagger, not a binary claim verifier with image / evidence inputs; the evidence-blindness counterfactuals (image-zeroing, evidence-shuffling) do not apply directly because RadFlag operates on the underlying generator's resampled outputs. Reported accuracy is the agreement between the flag bit (flagged $\Leftrightarrow$ \textsc{CONTRADICTED}) and the ensemble silver labels on the 107 claims with definite \textsc{SUP}/\textsc{CON} labels (precision $0.381$, recall $0.615$). Full breakdown in §\ref{sec:baselines}.}
 \end{table}
 
-Two of the four public detectors that completed show evidence-blindness on at least one axis, supporting the working hypothesis that evidence-blindness is a field-level property rather than a single-model artifact. The completed-baseline set is small and subject to revision as the pending re-runs land; the final version of this table is generated by \texttt{reproduce\_v6.sh} from the benchmark-release artifacts.
+Two of the three completed binary verifier baselines (BiomedCLIP, MedGemma) are evidence-blind on the evidence-shuffling axis; MAIRA-2 (as a zero-shot claim verifier, after fixing the trust-remote-code processor handshake described in §\ref{sec:limitations}) is not blind on either axis (IMG $=32.2$pp, ESG $=6.6$pp, accuracy 0.498). The MAIRA-2 result is the strongest counter-example to the field-level-blindness hypothesis in our data: an off-the-shelf grounded RRG model used as a claim verifier passes both diagnostic gates, even though its aggregate accuracy is barely above chance. The combination matters — high IMG with low aggregate accuracy means MAIRA-2 \emph{uses} the image but does not \emph{verify} the claim well; aggregate accuracy and image-grounding are two different deployment-relevant axes and a verifier can fail one without failing the other. The Claude 3.5 Sonnet row is reported as infrastructure-failed rather than dropped — every one of 500 calls exhausted our rate-limit retry, attributable to the anthropic 0.42 + claude-3-5-sonnet-20241022 combination on our submission Modal image; the API-baseline row will be repaired with a current Claude / Sonnet 4.6 in the camera-ready.
 
 \subsection{Text-only artifact audit}
 \label{sec:artifact-audit}
 
-We audit the claim-only text shortcut directly by training a RoBERTa-large classifier on the claim text only (no image, no evidence), once on the raw training distribution and once on the HO-filter-downweighted distribution. On the 4{,}132-claim v6 test split, the pre-filter text-only model reaches $82.0\%$ (vs majority-class $87.6\%$, $-5.6$pp); the post-filter text-only model reaches $79.5\%$ ($-8.1$pp vs majority). The HO filter reduces text-only shortcut performance by $2.5$ percentage points without changing the training-data row count (the filter downweights rather than drops). Both pre- and post-HO text-only accuracies fall below the majority-class baseline, which means the v6 training distribution is already largely free of the claim-only text shortcut — there is no trivial way to guess \texttt{SUPPORTED/CONTRADICTED} from the claim sentence alone. The HO filter's contribution on the artifact-audit axis is therefore small in absolute terms; its primary contribution is visible in the loss-drop ablation (removing the HO filter alone collapses IMG from $62.9$pp to $5.8$pp on v5.2), not in the text-only-vs-majority gap reported here.
+We audit the claim-only text shortcut directly by training a RoBERTa-large classifier on the claim text only (no image, no evidence), once on the raw training distribution and once on the HO-filter-downweighted distribution. On the 4{,}132-claim v6 test split, the pre-filter text-only model reaches $82.0\%$ (vs majority-class $87.6\%$, $-5.6$pp); the post-filter text-only model reaches $79.5\%$ ($-8.1$pp vs majority). The HO filter reduces text-only shortcut performance by $2.5$ percentage points without changing the training-data row count (the filter downweights rather than drops).
+
+A finer per-site audit using a RoBERTa-base text-pair classifier (Table~\ref{tab:cross-site-shortcut}) tells a different story. On each site separately the text-pair classifier beats the majority baseline by 6--8pp, and the HO filter would activate on 68--82\% of test rows. The v6 training distribution is therefore not shortcut-free at the site level; the original text-only-vs-majority gap appears to wash out only when sites are aggregated. The HO filter's primary contribution remains the loss-drop ablation effect (removing it alone collapses IMG from $62.9$pp to $5.8$pp on v5.2); the text-only-vs-majority gap should be read as confirming that the HO filter's downweighting changes the training distribution in the direction the loss-drop ablation shows is load-bearing, not as evidence that no shortcut existed in the first place.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Per-site text-only shortcut audit (RoBERTa-base, claim+evidence input).}
+\label{tab:cross-site-shortcut}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Site} & \textbf{n test} & \textbf{Majority acc} & \textbf{Text-pair acc} & \textbf{HO activation rate} \\
+\midrule
+ChestX-Det10 & 1{,}387 & 0.798 & 0.875 (+7.6pp) & 68.2\% \\
+OpenI        & 1{,}587 & 0.854 & 0.914 (+6.0pp) & 82.2\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{HO-filter activation on real-RRG hallucinations (M6 gate)}
+\label{sec:ho-rrg}
+
+A central deployment claim of the mitigation is that the HO filter, trained on synthetic negation-flipped negatives in the v6 train split, transfers to naturally-occurring hallucinations produced by RRG models. We test this by scoring all 1{,}934 ensemble-resolved real-RRG silver claims (§\ref{sec:real-rrg}) with the HO filter and reporting the activation rate at threshold $\tau=0.7$. Results in Table~\ref{tab:ho-rrg-activation}.
+
+\begin{table}[t]
+\centering
+\small
+\caption{HO-filter activation on the real-RRG ensemble silver-labeled claim set. Activation rate is the fraction of claims the text-pair classifier scores at $\geq 0.7$ confidence on the silver label. Plan target was $\geq 40\%$; safety floor $\geq 10\%$.}
+\label{tab:ho-rrg-activation}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Subset} & \textbf{n} & \textbf{n flagged} & \textbf{Activation rate} \\
+\midrule
+\textbf{All real-RRG claims} & \textbf{1{,}934} & \textbf{1{,}559} & \textbf{80.6\%} \\
+MedGemma-4B-IT  & 1{,}330 & 1{,}150 &  86.5\% \\
+MAIRA-2         & 305    & 209    & 68.5\% \\
+CheXagent-2-3b  & 299    & 200    & 66.9\% \\
+\midrule
+flagged $|$ silver=SUPPORTED   & 1{,}599 & 1{,}464 & 91.6\% \\
+flagged $|$ silver=CONTRADICTED & 335     & 95      & 28.4\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The aggregate $80.6\%$ activation passes the M6 gate by a wide margin: the HO filter does fire on real-RRG claims, not just synthetic ones. The structure of the activation matters: the filter flags $91.6\%$ of silver-SUPPORTED claims (most positive findings have a recognizable claim-text pattern that a text-only classifier can predict) but only $28.4\%$ of silver-CONTRADICTED claims (real hallucinations are harder to detect from claim text alone). The filter therefore primarily downweights ``easy'' positive claims, leaving the model to learn from the harder positives and from the hallucinations themselves. This is the right direction for the loss the filter participates in, but a reviewer should not read the $80.6\%$ as evidence that the filter would catch most hallucinations as a deployed standalone detector — its CONTRADICTED-class detection is well below either the SUPPORTED-class detection or majority-class baselines.
+
+\subsection{Support-score sharpness across configurations}
+\label{sec:support-sharpness}
+
+We measure the support-score (predicted-class softmax probability) distribution of each verifier on the 2{,}974-claim v6 test split, reporting per-configuration Kolmogorov–Smirnov distance to a uniform-on-$[0.5, 1.0]$ reference and the fraction of predictions above $0.9$ confidence. Numbers in Table~\ref{tab:support-sharpness}.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Support-score sharpness on v6 test split. Higher KS = farther from uniform, sharper distribution. Higher $p(y|x) > 0.9$ = more high-confidence predictions.}
+\label{tab:support-sharpness}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Config} & \textbf{Mean predicted prob} & \textbf{KS to uniform} & \textbf{Frac $p > 0.9$} \\
+\midrule
+v5.0-base       & 0.935 & 0.69 & 79.3\% \\
+v5.1-ground     & 0.938 & 0.73 & 82.0\% \\
+v5.2-real       & 0.933 & 0.63 & 77.5\% \\
+v5.3-contrast   & 0.929 & 0.62 & 76.9\% \\
+v6.0-retrain    & 0.922 & 0.62 & 76.9\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The distributions are similarly peaked across configurations (mean predicted probability $\geq 0.92$ for every model). The two evidence-blind configs (v5.0, v5.1) show \emph{slightly sharper} distributions than the non-blind ones (v5.2, v5.3, v6.0). This is the opposite of what a "sharpness explains conformal coverage" hypothesis would predict, and we do not endorse the simpler version of that explanation. The right reading is that the consistency + contrastive losses make the verifier less overconfident on text-shortcut-only claims, and the inverted cfBH conformal procedure depends on the joint structure of (support score, error event), not the marginal sharpness of either alone. Per-configuration conformal FDR is reported in supplement §C alongside the joint-distribution analysis.
 
 \section{Discussion}
 
@@ -332,9 +404,9 @@ The v5.4-final configuration (all five losses plus MC-dropout uncertainty regula
 
 Two baselines are scaffolded in the released codebase but were not run under the compute budget available for this submission; both will be reported in the extended version.
 
-\paragraph{RadFlag replication} \citep{zhang2024radflag}. A black-box temperature-sampling detector is scaffolded at \texttt{v5/eval/radflag\_replica.py}. For each generated claim, the procedure samples $K=10$ temperature-varied generations of the underlying RRG model and entails the original claim against each sample via Claude Opus; inconsistency rate is the flag signal. Applying RadFlag to MAIRA-2 outputs requires roughly $20{,}000$ Claude Opus entailment calls at current rate limits; this is feasible but falls outside the pre-submission compute window.
+\paragraph{RadFlag replication} \citep{zhang2024radflag}. A black-box temperature-sampling detector at \texttt{v5/eval/radflag\_replica.py}. For each MAIRA-2-generated claim we sampled $K=6$ temperature-1.0 alternative generations (paper used $K=10$; we reduced to fit budget), decomposed each via Claude Haiku, and checked entailment via Claude Opus. On a 200-claim subset (sampled from the gated-RRG pool to match MAIRA-2 outputs), RadFlag flagged $47.5\%$ of claims as hallucinations ($95/200$). Comparing the flag bit to the ensemble silver labels on the $107$ claims with definite \textsc{SUP}/\textsc{CON} silver labels: precision $= 0.381$, recall $= 0.615$, accuracy $= 0.664$ ($\textsc{TP}=16$, $\textsc{FP}=26$, $\textsc{FN}=10$, $\textsc{TN}=55$). For comparison, the original ML4H paper reported $28\%$ recall at $73\%$ precision on MedVersa with $K=10$ and $208$ reports — different P/R trade-off, attributable to backbone (MAIRA-2 vs MedVersa), $K$ (6 vs 10), and silver-label distribution. The full per-claim RadFlag JSONL is released alongside the paper code.
 
-\paragraph{ReXTrust-inspired white-box probe} \citep{hardy2024rextrust}. A linear probe on generator hidden states, reimplemented from the published description (no public code or weights), scaffolded at \texttt{v5/eval/hidden\_state\_probe.py}. We plan to apply it to both MedVersa \citep{zhou2024medversa} (the paper's backbone) and MAIRA-2 to argue the result is architecture-independent. The probe requires approximately $6$ H100-hours on each backbone.
+\paragraph{ReXTrust-inspired white-box probe} \citep{hardy2024rextrust}. A linear probe on generator hidden states, reimplemented from the published description (no public code or weights), scaffolded at \texttt{v5/eval/hidden\_state\_probe.py}. We attempted to apply the probe to MAIRA-2 in this submission; the embedding-extraction step returned an empty embedding stack on every claim under the deployed extractor implementation, which we trace to a layer-handle resolution issue specific to MAIRA-2's trust-remote-code architecture (the model exposes hidden states only through a non-default forward path that the extractor wrapper does not invoke). The MedVersa application requires installing the \texttt{medomni} package (not pip-installable; vendored at \url{https://github.com/rajpurkarlab/MedVersa}). Both probe runs are deferred to the camera-ready pending an extractor refactor.
 
 Neither omission affects the paper's central claim. The evidence-blindness diagnostic is model-agnostic and applies to both RadFlag and ReXTrust unchanged; the expected behavior (both detectors are image-backbone-dependent and should be tested for evidence-blindness separately) is discussed in §\ref{sec:baselines}.
 
